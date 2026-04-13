@@ -16,6 +16,65 @@ Traffic flow:
 
 The tunnel payload is encrypted end-to-end with AES-256-GCM before it enters the DataChannel.
 
+## Кратко По-Русски
+
+`olcrtc` это TCP-туннель поверх комнат Salute Jazz и WebRTC DataChannel.
+
+По сути:
+
+- `server` запускается на удалённой машине и делает исходящие TCP-подключения
+- `client` поднимает локальный SOCKS5-прокси
+- трафик идёт так: приложение -> SOCKS5 -> `client` -> Salute Jazz/WebRTC -> `server` -> целевой хост
+
+Что уже важно знать:
+
+- проект рассчитан на TCP, не на UDP
+- лучшее практическое применение сейчас это проксирование браузера, `curl`, пакетных загрузок и обычных TCP-клиентов
+- `-peers N` увеличивает прежде всего суммарную пропускную способность при нескольких одновременных соединениях
+- один TCP stream не размазывается по нескольким peer-ам, чтобы не ломать порядок байтов
+
+Быстрый запуск:
+
+1. На сервере:
+```bash
+./server -room new -peers 4 -v
+```
+
+2. На клиенте:
+```powershell
+.\client.exe -room "https://salutejazz.ru/ROOM?psw=..." -key YOUR_KEY -peers 4 -v
+```
+
+3. Проверка:
+```powershell
+curl.exe --socks5-hostname 127.0.0.1:1080 https://ifconfig.me/ip
+```
+
+Тест скорости:
+
+1. На сервере:
+```bash
+mkdir -p /root/bench
+dd if=/dev/zero of=/root/bench/100m.bin bs=1M count=100 status=none
+python3 -m http.server 8088 --directory /root/bench
+```
+
+2. На клиенте:
+```powershell
+curl.exe --max-time 15 --socks5-hostname 127.0.0.1:1080 -o NUL -w "speed=%{speed_download} bytes/s time=%{time_total}s code=%{http_code}`n" http://SERVER_IP:8088/100m.bin
+```
+
+Текущий практический результат по проекту:
+
+- single-stream: примерно до `33-43 Mbit/s`
+- aggregate на `-peers 4` и нескольких параллельных потоках: примерно до `85-90 Mbit/s`
+
+Что это значит:
+
+- `1080p` должно работать нормально
+- `1440p` возможно, но без гарантии на любом ролике
+- стабильные `100+ Mbit/s` в текущей архитектуре не подтверждены
+
 ## What The Project Does
 
 The project has two binaries:
