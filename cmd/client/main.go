@@ -1,0 +1,150 @@
+package main
+
+import (
+	"context"
+	"encoding/hex"
+	"flag"
+	"fmt"
+	"log/slog"
+	"math/rand/v2"
+	"os"
+	"os/signal"
+	"syscall"
+	"time"
+
+	"github.com/Kavun-Sama/salute-ajazz-rtc-tunnel/internal/crypto"
+	"github.com/Kavun-Sama/salute-ajazz-rtc-tunnel/internal/transport"
+	"github.com/Kavun-Sama/salute-ajazz-rtc-tunnel/internal/transport/jazz"
+	"github.com/Kavun-Sama/salute-ajazz-rtc-tunnel/internal/tunnel"
+)
+
+func main() {
+	room := flag.String("room", "", "Jazz room URL")
+	key := flag.String("key", "", "hex 32 bytes encryption key")
+	listen := flag.String("listen", "127.0.0.1:1080", "local SOCKS5 address")
+	duo := flag.Bool("duo", false, "use 2 transport peers in parallel")
+	verbose := flag.Bool("v", false, "verbose logging")
+	flag.Parse()
+
+	// Setup logging
+	logLevel := slog.LevelInfo
+	if *verbose {
+		logLevel = slog.LevelDebug
+	}
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: logLevel}))
+	slog.SetDefault(logger)
+
+	if *room == "" {
+		logger.Error("room is required (-room flag)")
+		os.Exit(1)
+	}
+	if *key == "" {
+		logger.Error("key is required (-key flag)")
+		os.Exit(1)
+	}
+
+	// Decode key
+	keyBytes, err := hex.DecodeString(*key)
+	if err != nil {
+		logger.Error("decode key", "error", err)
+		os.Exit(1)
+	}
+	if len(keyBytes) != 32 {
+		logger.Error("key must be 32 bytes", "got", len(keyBytes))
+		os.Exit(1)
+	}
+
+	cipher, err := crypto.NewCipher(keyBytes)
+	if err != nil {
+		logger.Error("cipher error", "error", err)
+		os.Exit(1)
+	}
+
+	// Parse room URL
+	roomID, password, err := jazz.ParseRoomURL(*room)
+	if err != nil {
+		logger.Error("parse room URL", "error", err)
+		os.Exit(1)
+	}
+	if password == "" {
+		logger.Error("room URL must include password (psw parameter)")
+		os.Exit(1)
+	}
+
+	// Setup API client and preconnect
+	api := jazz.NewAPIClient(logger)
+
+	preResp, err := api.Preconnect(roomID, password)
+	if err != nil {
+		logger.Error("preconnect", "error", err)
+		os.Exit(1)
+	}
+
+	// Create transport peers
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	peerCount := 1
+	if *duo {
+		peerCount = 2
+	}
+
+	peers := make([]transport.Transport, 0, peerCount)
+	for i := 0; i < peerCount; i++ {
+		peer := jazz.NewPeer(jazz.PeerConfig{
+			RoomID:       roomID,
+			Password:     password,
+			ConnectorURL: preResp.ConnectorURL,
+			APIClient:    api,
+			Logger:       logger,
+		})
+
+		if err := peer.Connect(ctx); err != nil {
+			logger.Error("peer connect failed", "error", err, "peer", i)
+			os.Exit(1)
+		}
+
+		go peer.WatchConnection(ctx)
+		peers = append(peers, peer)
+	}
+
+	logger.Info("all peers connected", "roomId", roomID, "peers", peerCount)
+
+	// Generate client ID
+	clientID := generateClientID()
+
+	// Create and run tunnel client
+	client := tunnel.NewClient(tunnel.ClientConfig{
+		Peers:    peers,
+		Cipher:   cipher,
+		Listen:   *listen,
+		ClientID: clientID,
+		Logger:   logger,
+	})
+
+	logger.Info("starting SOCKS5 proxy",
+		"listen", *listen,
+		"clientID", fmt.Sprintf("%08x", clientID),
+	)
+
+	// Handle signals
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+
+	go func() {
+		<-sigCh
+		logger.Info("shutting down")
+		cancel()
+	}()
+
+	if err := client.Run(ctx); err != nil {
+		logger.Error("client error", "error", err)
+		os.Exit(1)
+	}
+}
+
+func generateClientID() uint32 {
+	t := uint32(time.Now().Unix()) & 0xFFFF0000
+	r := rand.Uint32() & 0x0000FFFF
+	return t | r
+}
