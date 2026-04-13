@@ -24,6 +24,9 @@ type Transport interface {
 	// CanSend reports whether the transport can accept more data (backpressure check).
 	CanSend() bool
 
+	// BufferedAmount reports the current buffered byte count of the best available send path.
+	BufferedAmount() uint64
+
 	// SetOnData registers a callback for incoming data.
 	SetOnData(func([]byte))
 

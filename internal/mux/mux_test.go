@@ -235,3 +235,44 @@ func TestStreamWrite(t *testing.T) {
 		t.Fatalf("expected payload 'hello', got %q", payload)
 	}
 }
+
+func TestHandleDataBackpressureDoesNotDropFrames(t *testing.T) {
+	sendFn := func(data []byte) error { return nil }
+
+	m := NewMux(sendFn, nil, nil)
+	key := StreamKey{ClientID: 7, SID: 9}
+	stream := m.OpenStream(key)
+
+	done := make(chan struct{})
+	go func() {
+		for i := 0; i < maxPendingFrames+1; i++ {
+			payload := []byte{byte(i)}
+			m.HandleFrame(MakeFrame(key.ClientID, key.SID, FlagData, payload))
+		}
+		close(done)
+	}()
+
+	select {
+	case <-done:
+		t.Fatal("expected producer to block when stream queue is full")
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	got := stream.Read()
+	if len(got) != 1 || got[0] != 0 {
+		t.Fatalf("unexpected first payload: %v", got)
+	}
+
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("producer did not resume after buffer space was freed")
+	}
+
+	for i := 1; i < maxPendingFrames+1; i++ {
+		got = stream.Read()
+		if len(got) != 1 || got[0] != byte(i) {
+			t.Fatalf("payload %d: got %v", i, got)
+		}
+	}
+}

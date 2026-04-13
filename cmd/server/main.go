@@ -21,6 +21,7 @@ func main() {
 	room := flag.String("room", "", "Jazz room URL or 'new' to create a new one")
 	key := flag.String("key", "", "hex 32 bytes encryption key (if empty, generate and print)")
 	duo := flag.Bool("duo", false, "use 2 transport peers in parallel")
+	peersFlag := flag.Int("peers", 0, "number of transport peers to open (overrides -duo)")
 	dns := flag.String("dns", "1.1.1.1:53", "DNS server")
 	socksProxy := flag.String("socks", "", "upstream SOCKS5 proxy addr:port")
 	verbose := flag.Bool("v", false, "verbose logging")
@@ -60,27 +61,32 @@ func main() {
 	// Preconnect
 	preResp, err := api.Preconnect(roomID, password)
 	if err != nil {
-		logger.Error("preconnect error", "error", err)
-		os.Exit(1)
+		logger.Warn("preconnect failed, using default connector", "error", err, "connectorUrl", jazz.DefaultConnectorURL)
+		preResp = &jazz.PreconnectResponse{
+			ConnectorURL: jazz.DefaultConnectorURL,
+		}
 	}
 
 	// Create transport peers
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	peerCount := 1
-	if *duo {
-		peerCount = 2
+	peerCount, err := resolvePeerCount(*peersFlag, *duo)
+	if err != nil {
+		logger.Error("peer config error", "error", err)
+		os.Exit(1)
 	}
 
 	peers := make([]transport.Transport, 0, peerCount)
 	for i := 0; i < peerCount; i++ {
 		peer := jazz.NewPeer(jazz.PeerConfig{
-			RoomID:       roomID,
-			Password:     password,
-			ConnectorURL: preResp.ConnectorURL,
-			APIClient:    api,
-			Logger:       logger,
+			RoomID:                roomID,
+			Password:              password,
+			ConnectorURL:          preResp.ConnectorURL,
+			APIClient:             api,
+			ParticipantName:       peerName("server", i),
+			TargetParticipantName: peerName("client", i),
+			Logger:                logger,
 		})
 
 		if err := peer.Connect(ctx); err != nil {
@@ -121,6 +127,23 @@ func main() {
 		logger.Error("server error", "error", err)
 		os.Exit(1)
 	}
+}
+
+func resolvePeerCount(peers int, duo bool) (int, error) {
+	if peers < 0 {
+		return 0, fmt.Errorf("peers must be >= 0")
+	}
+	if peers > 0 {
+		return peers, nil
+	}
+	if duo {
+		return 2, nil
+	}
+	return 1, nil
+}
+
+func peerName(role string, index int) string {
+	return fmt.Sprintf("olcrtc-%s-%d", role, index+1)
 }
 
 func resolveKey(keyHex string) ([]byte, error) {

@@ -8,8 +8,10 @@ import (
 )
 
 const (
-	headerSize = 9 // clientID(4) + sid(2) + length(2) + flags(1)
-	maxChunk   = 7000
+	headerSize       = 9 // clientID(4) + sid(2) + length(2) + flags(1)
+	maxChunk         = 16 * 1024
+	maxPendingFrames = 256
+	maxPendingBytes  = 4 * 1024 * 1024
 
 	FlagData  byte = 0x01
 	FlagClose byte = 0x02
@@ -24,27 +26,63 @@ type StreamKey struct {
 
 // Stream represents a single multiplexed stream.
 type Stream struct {
-	Key    StreamKey
-	inCh   chan []byte
-	sendFn func([]byte) error
-	closed bool
-	mu     sync.Mutex
-	log    *slog.Logger
+	Key          StreamKey
+	sendFn       func([]byte) error
+	closed       bool
+	mu           sync.Mutex
+	cond         *sync.Cond
+	pending      [][]byte
+	pendingBytes int
+	log          *slog.Logger
+}
+
+func newStream(key StreamKey, sendFn func([]byte) error, logger *slog.Logger) *Stream {
+	s := &Stream{
+		Key:    key,
+		sendFn: sendFn,
+		log:    logger.With("clientID", key.ClientID, "sid", key.SID),
+	}
+	s.cond = sync.NewCond(&s.mu)
+	return s
 }
 
 // Read returns the next data chunk from the stream, blocking until available.
 // Returns nil if the stream is closed.
 func (s *Stream) Read() []byte {
-	data, ok := <-s.inCh
-	if !ok {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	for len(s.pending) == 0 && !s.closed {
+		s.cond.Wait()
+	}
+
+	if len(s.pending) == 0 {
 		return nil
 	}
+
+	data := s.pending[0]
+	s.pending[0] = nil
+	s.pending = s.pending[1:]
+	s.pendingBytes -= len(data)
+	s.cond.Broadcast()
 	return data
 }
 
-// ReadCh returns the channel for use in select statements.
-func (s *Stream) ReadCh() <-chan []byte {
-	return s.inCh
+func (s *Stream) enqueue(data []byte) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	for !s.closed && (len(s.pending) >= maxPendingFrames || s.pendingBytes+len(data) > maxPendingBytes) {
+		s.cond.Wait()
+	}
+	if s.closed {
+		return false
+	}
+
+	s.pending = append(s.pending, data)
+	s.pendingBytes += len(data)
+	s.cond.Broadcast()
+	return true
 }
 
 // Write sends data through the transport via the mux frame format.
@@ -80,6 +118,7 @@ func (s *Stream) Close() error {
 		return nil
 	}
 	s.closed = true
+	s.cond.Broadcast()
 	s.mu.Unlock()
 
 	frame := MakeFrame(s.Key.ClientID, s.Key.SID, FlagClose, nil)
@@ -128,12 +167,7 @@ func (m *Mux) OpenStream(key StreamKey) *Stream {
 		return s
 	}
 
-	s := &Stream{
-		Key:    key,
-		inCh:   make(chan []byte, 256),
-		sendFn: m.sendFn,
-		log:    m.log.With("clientID", key.ClientID, "sid", key.SID),
-	}
+	s := newStream(key, m.sendFn, m.log)
 	m.streams[key] = s
 	return s
 }
@@ -191,12 +225,7 @@ func (m *Mux) handleData(key StreamKey, payload []byte) {
 
 	if !ok {
 		// New stream from remote side
-		s = &Stream{
-			Key:    key,
-			inCh:   make(chan []byte, 256),
-			sendFn: m.sendFn,
-			log:    m.log.With("clientID", key.ClientID, "sid", key.SID),
-		}
+		s = newStream(key, m.sendFn, m.log)
 
 		m.mu.Lock()
 		// Double-check
@@ -216,10 +245,8 @@ func (m *Mux) handleData(key StreamKey, payload []byte) {
 	dataCopy := make([]byte, len(payload))
 	copy(dataCopy, payload)
 
-	select {
-	case s.inCh <- dataCopy:
-	default:
-		m.log.Warn("stream buffer full, dropping frame", "clientID", key.ClientID, "sid", key.SID)
+	if !s.enqueue(dataCopy) {
+		m.log.Debug("dropping frame for closed stream", "clientID", key.ClientID, "sid", key.SID)
 	}
 }
 
@@ -235,7 +262,7 @@ func (m *Mux) handleClose(key StreamKey) {
 		s.mu.Lock()
 		if !s.closed {
 			s.closed = true
-			close(s.inCh)
+			s.cond.Broadcast()
 		}
 		s.mu.Unlock()
 	}
@@ -258,7 +285,7 @@ func (m *Mux) handleReset(clientID uint32) {
 		s.mu.Lock()
 		if !s.closed {
 			s.closed = true
-			close(s.inCh)
+			s.cond.Broadcast()
 		}
 		s.mu.Unlock()
 	}
@@ -275,7 +302,7 @@ func (m *Mux) CloseAll() {
 		s.mu.Lock()
 		if !s.closed {
 			s.closed = true
-			close(s.inCh)
+			s.cond.Broadcast()
 		}
 		s.mu.Unlock()
 	}
@@ -294,7 +321,7 @@ func (m *Mux) RemoveStream(key StreamKey) {
 		s.mu.Lock()
 		if !s.closed {
 			s.closed = true
-			close(s.inCh)
+			s.cond.Broadcast()
 		}
 		s.mu.Unlock()
 	}

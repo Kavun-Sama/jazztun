@@ -7,7 +7,6 @@ import (
 	"log/slog"
 	"net"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/Kavun-Sama/salute-ajazz-rtc-tunnel/internal/crypto"
@@ -24,17 +23,16 @@ type ConnectRequest struct {
 
 // Server accepts mux streams and proxies them to TCP connections.
 type Server struct {
-	peers    []transport.Transport
-	cipher   *crypto.Cipher
-	mx       *mux.Mux
-	dns      string
-	socks    string // upstream SOCKS5 proxy
+	peers  []transport.Transport
+	cipher *crypto.Cipher
+	mx     *mux.Mux
+	dns    string
+	socks  string // upstream SOCKS5 proxy
 
-	conns    map[mux.StreamKey]net.Conn
-	connsMu  sync.RWMutex
+	conns   map[mux.StreamKey]net.Conn
+	connsMu sync.RWMutex
 
-	peerIdx  atomic.Uint32 // round-robin peer selection
-	log      *slog.Logger
+	log *slog.Logger
 }
 
 // ServerConfig holds configuration for creating a tunnel server.
@@ -213,42 +211,55 @@ func (s *Server) handleStream(stream *mux.Stream) {
 
 // writeToStream writes data to a stream, respecting backpressure.
 func (s *Server) writeToStream(stream *mux.Stream, data []byte) error {
-	s.waitCanSend()
 	return stream.Write(data)
 }
 
 // sendFrame encrypts and sends a frame through a transport peer.
 func (s *Server) sendFrame(data []byte) error {
+	if len(s.peers) == 0 {
+		return fmt.Errorf("no transport peers configured")
+	}
+
+	clientID, sid, _, flags, _, err := mux.ParseFrame(data)
+	if err != nil {
+		return fmt.Errorf("parse mux frame: %w", err)
+	}
+
+	if flags&mux.FlagReset != 0 {
+		for _, peer := range s.peers {
+			if err := s.sendFrameToPeer(peer, data); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+
+	return s.sendFrameToPeer(s.peers[s.streamPeerIndex(clientID, sid)], data)
+}
+
+func (s *Server) sendFrameToPeer(peer transport.Transport, data []byte) error {
 	encrypted, err := s.cipher.Encrypt(data)
 	if err != nil {
 		return fmt.Errorf("encrypt: %w", err)
 	}
 
-	s.waitCanSend()
+	tick := time.NewTicker(1 * time.Millisecond)
+	defer tick.Stop()
 
-	// Round-robin peer selection
-	idx := int(s.peerIdx.Add(1)-1) % len(s.peers)
-	return s.peers[idx].Send(encrypted)
+	for {
+		if peer.CanSend() {
+			return peer.Send(encrypted)
+		}
+		<-tick.C
+	}
 }
 
-// waitCanSend blocks until at least one peer can accept data,
-// using a channel-based select instead of a sleep loop.
-func (s *Server) waitCanSend() {
-	for _, p := range s.peers {
-		if p.CanSend() {
-			return
-		}
+func (s *Server) streamPeerIndex(clientID uint32, sid uint16) int {
+	if len(s.peers) == 1 {
+		return 0
 	}
-	// No peer ready — wait on a timer channel in select, not time.Sleep
-	tick := time.NewTicker(2 * time.Millisecond)
-	defer tick.Stop()
-	for range tick.C {
-		for _, p := range s.peers {
-			if p.CanSend() {
-				return
-			}
-		}
-	}
+	hash := clientID*2654435761 ^ uint32(sid)
+	return int(hash % uint32(len(s.peers)))
 }
 
 func (s *Server) closeAllConns() {

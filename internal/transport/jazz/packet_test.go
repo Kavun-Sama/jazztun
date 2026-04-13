@@ -3,12 +3,18 @@ package jazz
 import (
 	"bytes"
 	"testing"
+
+	livekit "github.com/livekit/protocol/livekit"
+	"google.golang.org/protobuf/proto"
 )
 
 func TestEncodeDecodeRoundtrip(t *testing.T) {
 	payload := []byte("hello, tunnel data")
 
-	encoded := EncodeDataPacket(payload)
+	encoded, err := EncodeDataPacket(payload, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
 	decoded, err := DecodeDataPacket(encoded)
 	if err != nil {
 		t.Fatal(err)
@@ -22,7 +28,10 @@ func TestEncodeDecodeRoundtrip(t *testing.T) {
 func TestEncodeDecodeEmptyPayload(t *testing.T) {
 	payload := []byte{}
 
-	encoded := EncodeDataPacket(payload)
+	encoded, err := EncodeDataPacket(payload, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
 	decoded, err := DecodeDataPacket(encoded)
 	if err != nil {
 		t.Fatal(err)
@@ -39,7 +48,10 @@ func TestEncodeDecodeLargePayload(t *testing.T) {
 		payload[i] = byte(i % 256)
 	}
 
-	encoded := EncodeDataPacket(payload)
+	encoded, err := EncodeDataPacket(payload, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
 	decoded, err := DecodeDataPacket(encoded)
 	if err != nil {
 		t.Fatal(err)
@@ -66,18 +78,20 @@ func TestDecodeInvalid(t *testing.T) {
 
 func TestEncodeFormat(t *testing.T) {
 	payload := []byte{0xAA, 0xBB}
-	encoded := EncodeDataPacket(payload)
+	encoded, err := EncodeDataPacket(payload, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
 
-	// Verify the outer structure:
-	// 0x08 0x00 = field 1, varint, value 0 (RELIABLE)
-	// 0x12 ...  = field 2, length-delimited (UserPacket)
-	if len(encoded) < 4 {
-		t.Fatal("encoded too short")
+	var packet livekit.DataPacket
+	if err := proto.Unmarshal(encoded, &packet); err != nil {
+		t.Fatal(err)
 	}
-	if encoded[0] != 0x08 || encoded[1] != 0x00 {
-		t.Fatalf("expected kind field 0x08 0x00, got %x %x", encoded[0], encoded[1])
+
+	if packet.GetKind() != livekit.DataPacket_RELIABLE {
+		t.Fatalf("unexpected packet kind: %v", packet.GetKind())
 	}
-	if encoded[2] != 0x12 {
-		t.Fatalf("expected user packet tag 0x12, got %x", encoded[2])
+	if !bytes.Equal(packet.GetUser().GetPayload(), payload) {
+		t.Fatalf("unexpected payload: got %x, want %x", packet.GetUser().GetPayload(), payload)
 	}
 }

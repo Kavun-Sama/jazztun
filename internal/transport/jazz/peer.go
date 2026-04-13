@@ -15,7 +15,7 @@ import (
 )
 
 const (
-	maxBufferedAmount    = 512 * 1024 // 512 KB backpressure threshold
+	maxBufferedAmount    = 4 * 1024 * 1024 // 4 MB backpressure threshold
 	pingInterval         = 5 * time.Second
 	reconnectMaxAttempts = 10
 	reconnectWindow      = 5 * time.Minute
@@ -35,40 +35,57 @@ type WSMessage struct {
 
 // Peer implements the Transport interface using Jazz/LiveKit WebRTC.
 type Peer struct {
-	roomID       string
-	password     string
-	connectorURL string
-	apiClient    *APIClient
+	roomID                string
+	password              string
+	connectorURL          string
+	apiClient             *APIClient
+	participantName       string
+	targetParticipantName string
 
-	ws        *websocket.Conn
-	wsMu      sync.Mutex
-	pc        *webrtc.PeerConnection
-	dc        *webrtc.DataChannel
-	groupID   string
-	participantSID string
+	ws      *websocket.Conn
+	wsMu    sync.Mutex
+	pc      *webrtc.PeerConnection
+	dc      *webrtc.DataChannel
+	pubPC   *webrtc.PeerConnection
+	pubDC   *webrtc.DataChannel
+	groupID string
+
+	participantSID      string
+	participantIdentity string
+
+	remoteIdentities   map[string]struct{}
+	remoteIdentitiesMu sync.RWMutex
 
 	onData      func([]byte)
 	onDataMu    sync.RWMutex
 	onReconnect func()
 	onReconnMu  sync.RWMutex
 
-	readyCh    chan struct{}
-	doneCh     chan struct{}
-	closeCh    chan struct{}
-	closed     atomic.Bool
+	readyCh       chan struct{}
+	doneCh        chan struct{}
+	closeCh       chan struct{}
+	closed        atomic.Bool
+	targetReadyCh chan struct{}
 
 	iceServers []webrtc.ICEServer
+	pubReadyCh chan struct{}
+
+	pubTrackMu          sync.Mutex
+	pubTrackCID         string
+	pubTrackPublishedCh chan struct{}
 
 	log *slog.Logger
 }
 
 // PeerConfig holds configuration for creating a new Peer.
 type PeerConfig struct {
-	RoomID       string
-	Password     string
-	ConnectorURL string
-	APIClient    *APIClient
-	Logger       *slog.Logger
+	RoomID                string
+	Password              string
+	ConnectorURL          string
+	APIClient             *APIClient
+	ParticipantName       string
+	TargetParticipantName string
+	Logger                *slog.Logger
 }
 
 // NewPeer creates a new Jazz transport peer.
@@ -77,14 +94,19 @@ func NewPeer(cfg PeerConfig) *Peer {
 		cfg.Logger = slog.Default()
 	}
 	return &Peer{
-		roomID:       cfg.RoomID,
-		password:     cfg.Password,
-		connectorURL: cfg.ConnectorURL,
-		apiClient:    cfg.APIClient,
-		readyCh:      make(chan struct{}),
-		doneCh:       make(chan struct{}),
-		closeCh:      make(chan struct{}),
-		log:          cfg.Logger.With(slog.String("component", "jazz/peer")),
+		roomID:                cfg.RoomID,
+		password:              cfg.Password,
+		connectorURL:          cfg.ConnectorURL,
+		apiClient:             cfg.APIClient,
+		participantName:       cfg.ParticipantName,
+		targetParticipantName: cfg.TargetParticipantName,
+		remoteIdentities:      make(map[string]struct{}),
+		readyCh:               make(chan struct{}),
+		pubReadyCh:            make(chan struct{}),
+		doneCh:                make(chan struct{}),
+		closeCh:               make(chan struct{}),
+		targetReadyCh:         make(chan struct{}),
+		log:                   cfg.Logger.With(slog.String("component", "jazz/peer")),
 	}
 }
 
@@ -107,6 +129,28 @@ func (p *Peer) Connect(ctx context.Context) error {
 	select {
 	case <-p.readyCh:
 		p.log.Info("data channel ready")
+		if err := p.startPublisher(ctx); err != nil {
+			p.log.Warn("publisher setup failed", "error", err)
+		} else {
+			select {
+			case <-p.pubReadyCh:
+				p.log.Info("publisher data channel ready")
+				if p.targetParticipantName != "" {
+					select {
+					case <-p.targetReadyCh:
+						p.log.Info("target participant ready", "name", p.targetParticipantName)
+					case <-time.After(15 * time.Second):
+						return fmt.Errorf("target participant %q not discovered", p.targetParticipantName)
+					case <-ctx.Done():
+						return ctx.Err()
+					}
+				}
+			case <-time.After(10 * time.Second):
+				p.log.Warn("publisher data channel not ready yet")
+			case <-ctx.Done():
+				return ctx.Err()
+			}
+		}
 		return nil
 	case <-p.doneCh:
 		return fmt.Errorf("connection closed before data channel ready")
@@ -121,12 +165,16 @@ func (p *Peer) Send(data []byte) error {
 	if p.closed.Load() {
 		return fmt.Errorf("peer is closed")
 	}
-	if p.dc == nil {
+	dc := p.sendDataChannel()
+	if dc == nil {
 		return fmt.Errorf("data channel not ready")
 	}
 
-	packet := EncodeDataPacket(data)
-	return p.dc.Send(packet)
+	packet, err := EncodeDataPacket(data, p.destinationIdentities())
+	if err != nil {
+		return err
+	}
+	return dc.Send(packet)
 }
 
 // Close tears down the peer connection.
@@ -143,8 +191,14 @@ func (p *Peer) Close() error {
 	if p.dc != nil {
 		p.dc.Close()
 	}
+	if p.pubDC != nil {
+		p.pubDC.Close()
+	}
 	if p.pc != nil {
 		p.pc.Close()
+	}
+	if p.pubPC != nil {
+		p.pubPC.Close()
 	}
 
 	// Signal done if not already
@@ -170,10 +224,23 @@ func (p *Peer) Done() <-chan struct{} {
 
 // CanSend checks backpressure on the data channel.
 func (p *Peer) CanSend() bool {
-	if p.dc == nil {
+	dc := p.sendDataChannel()
+	if dc == nil {
 		return false
 	}
-	return p.dc.BufferedAmount() < maxBufferedAmount
+	if p.targetParticipantName != "" && len(p.destinationIdentities()) == 0 {
+		return false
+	}
+	return dc.BufferedAmount() < maxBufferedAmount
+}
+
+// BufferedAmount reports the buffered byte count of the least-loaded send path.
+func (p *Peer) BufferedAmount() uint64 {
+	dc := p.sendDataChannel()
+	if dc == nil {
+		return ^uint64(0)
+	}
+	return dc.BufferedAmount()
 }
 
 // SetOnData registers a callback for incoming data channel messages.
@@ -238,16 +305,21 @@ func (p *Peer) WatchConnection(ctx context.Context) {
 		// Re-preconnect
 		preResp, err := p.apiClient.Preconnect(p.roomID, p.password)
 		if err != nil {
-			p.log.Error("preconnect failed", "error", err)
-			continue
+			p.log.Warn("preconnect failed, reusing default connector", "error", err, "connectorUrl", DefaultConnectorURL)
+			p.connectorURL = DefaultConnectorURL
+		} else {
+			p.connectorURL = preResp.ConnectorURL
 		}
-		p.connectorURL = preResp.ConnectorURL
 
 		// Reset channels for new connection
 		p.doneCh = make(chan struct{})
 		p.readyCh = make(chan struct{})
+		p.pubReadyCh = make(chan struct{})
 		p.closeCh = make(chan struct{})
+		p.targetReadyCh = make(chan struct{})
 		p.closed.Store(false)
+		p.pubPC = nil
+		p.pubDC = nil
 
 		if err := p.Connect(ctx); err != nil {
 			p.log.Error("reconnect failed", "error", err)
@@ -304,13 +376,18 @@ func (p *Peer) closeWS() {
 }
 
 func (p *Peer) join() error {
+	participantName := p.participantName
+	if participantName == "" {
+		participantName = "olcrtc"
+	}
+
 	payload := map[string]any{
 		"password":        p.password,
-		"participantName": "olcrtc",
+		"participantName": participantName,
 		"supportedFeatures": map[string]any{
-			"attachedRooms":  true,
-			"sessionGroups":  true,
-			"transcription":  true,
+			"attachedRooms": true,
+			"sessionGroups": true,
+			"transcription": true,
 		},
 		"isSilent": false,
 	}
@@ -400,6 +477,10 @@ func (p *Peer) handleMessage(msg WSMessage) {
 	switch msg.Event {
 	case "join-response":
 		p.handleJoinResponse(msg.Payload)
+	case "participant-joined":
+		p.handleParticipantJoined(msg.Payload)
+	case "participant-left":
+		p.handleParticipantLeft(msg.Payload)
 	case "media-out":
 		p.handleMediaOut(msg.Payload)
 	case "leave-response":
@@ -411,8 +492,8 @@ func (p *Peer) handleMessage(msg WSMessage) {
 
 func (p *Peer) handleJoinResponse(payload json.RawMessage) {
 	var resp struct {
-		RoomID    string `json:"roomId"`
-		MeetingID string `json:"meetingId"`
+		RoomID      string `json:"roomId"`
+		MeetingID   string `json:"meetingId"`
 		Participant struct {
 			SessionID     string `json:"sessionId"`
 			ParticipantID string `json:"participantId"`
@@ -438,12 +519,14 @@ func (p *Peer) handleJoinResponse(payload json.RawMessage) {
 
 func (p *Peer) handleMediaOut(payload json.RawMessage) {
 	var media struct {
-		Method        string          `json:"method"`
-		Configuration json.RawMessage `json:"configuration"`
-		Join          json.RawMessage `json:"join"`
-		Description   json.RawMessage `json:"description"`
-		IceCandidates json.RawMessage `json:"rtcIceCandidates"`
-		PingReq       json.RawMessage `json:"ping_req"`
+		Method                 string          `json:"method"`
+		Configuration          json.RawMessage `json:"configuration"`
+		Join                   json.RawMessage `json:"join"`
+		TrackPublishedResponse json.RawMessage `json:"trackPublishedResponse"`
+		Update                 json.RawMessage `json:"update"`
+		Description            json.RawMessage `json:"description"`
+		IceCandidates          json.RawMessage `json:"rtcIceCandidates"`
+		PingReq                json.RawMessage `json:"ping_req"`
 	}
 
 	if err := json.Unmarshal(payload, &media); err != nil {
@@ -456,8 +539,14 @@ func (p *Peer) handleMediaOut(payload json.RawMessage) {
 		p.handleRTCConfig(media.Configuration)
 	case "rtc:join":
 		p.handleRTCJoin(media.Join)
+	case "rtc:participants:update":
+		p.handleParticipantsUpdate(media.Update)
+	case "rtc:track:published":
+		p.handleTrackPublished(media.TrackPublishedResponse)
 	case "rtc:offer":
 		p.handleRTCOffer(media.Description)
+	case "rtc:answer":
+		p.handleRTCAnswer(media.Description)
 	case "rtc:ice":
 		p.handleRemoteICE(media.IceCandidates)
 	case "rtc:ping":
@@ -496,8 +585,16 @@ func (p *Peer) handleRTCConfig(data json.RawMessage) {
 func (p *Peer) handleRTCJoin(data json.RawMessage) {
 	var join struct {
 		Participant struct {
-			SID string `json:"sid"`
+			SID      string `json:"sid"`
+			Identity string `json:"identity"`
+			Name     string `json:"name"`
 		} `json:"participant"`
+		OtherParticipants []struct {
+			SID      string `json:"sid"`
+			Identity string `json:"identity"`
+			Name     string `json:"name"`
+			State    string `json:"state"`
+		} `json:"otherParticipants"`
 		Room struct {
 			SID string `json:"sid"`
 		} `json:"room"`
@@ -511,10 +608,58 @@ func (p *Peer) handleRTCJoin(data json.RawMessage) {
 	}
 
 	p.participantSID = join.Participant.SID
+	p.participantIdentity = join.Participant.Identity
+	for _, other := range join.OtherParticipants {
+		p.updateRemoteIdentity(other.Identity, other.Name, other.State)
+	}
+
 	p.log.Info("rtc:join received",
 		"participantSID", p.participantSID,
+		"participantIdentity", p.participantIdentity,
 		"roomSID", join.Room.SID,
 	)
+}
+
+func (p *Peer) handleParticipantsUpdate(data json.RawMessage) {
+	var update struct {
+		Participants []struct {
+			SID      string `json:"sid"`
+			Identity string `json:"identity"`
+			Name     string `json:"name"`
+			State    string `json:"state"`
+		} `json:"participants"`
+	}
+
+	if err := json.Unmarshal(data, &update); err != nil {
+		p.log.Warn("unmarshal rtc:participants:update", "error", err)
+		return
+	}
+
+	for _, participant := range update.Participants {
+		p.updateRemoteIdentity(participant.Identity, participant.Name, participant.State)
+	}
+}
+
+func (p *Peer) handleTrackPublished(data json.RawMessage) {
+	var resp struct {
+		CID string `json:"cid"`
+	}
+
+	if err := json.Unmarshal(data, &resp); err != nil {
+		p.log.Warn("unmarshal rtc:track:published", "error", err)
+		return
+	}
+
+	p.pubTrackMu.Lock()
+	defer p.pubTrackMu.Unlock()
+
+	if resp.CID != "" && resp.CID == p.pubTrackCID && p.pubTrackPublishedCh != nil {
+		select {
+		case <-p.pubTrackPublishedCh:
+		default:
+			close(p.pubTrackPublishedCh)
+		}
+	}
 }
 
 func (p *Peer) handleRTCOffer(data json.RawMessage) {
@@ -533,6 +678,31 @@ func (p *Peer) handleRTCOffer(data json.RawMessage) {
 	if err := p.setupPeerConnection(desc.SDP); err != nil {
 		p.log.Error("setup peer connection", "error", err)
 		return
+	}
+}
+
+func (p *Peer) handleRTCAnswer(data json.RawMessage) {
+	var desc struct {
+		Type string `json:"type"`
+		SDP  string `json:"sdp"`
+	}
+
+	if err := json.Unmarshal(data, &desc); err != nil {
+		p.log.Error("unmarshal rtc:answer", "error", err)
+		return
+	}
+
+	if p.pubPC == nil {
+		p.log.Warn("received publisher answer before publisher peer connection")
+		return
+	}
+
+	answer := webrtc.SessionDescription{
+		Type: webrtc.SDPTypeAnswer,
+		SDP:  desc.SDP,
+	}
+	if err := p.pubPC.SetRemoteDescription(answer); err != nil {
+		p.log.Error("set publisher remote description", "error", err)
 	}
 }
 
@@ -567,19 +737,7 @@ func (p *Peer) setupPeerConnection(offerSDP string) error {
 		})
 
 		dc.OnMessage(func(msg webrtc.DataChannelMessage) {
-			payload, err := DecodeDataPacket(msg.Data)
-			if err != nil {
-				p.log.Warn("decode data packet", "error", err)
-				return
-			}
-
-			p.onDataMu.RLock()
-			fn := p.onData
-			p.onDataMu.RUnlock()
-
-			if fn != nil {
-				fn(payload)
-			}
+			p.handleDataChannelMessage(msg)
 		})
 
 		dc.OnClose(func() {
@@ -591,7 +749,7 @@ func (p *Peer) setupPeerConnection(offerSDP string) error {
 		if c == nil {
 			return
 		}
-		p.sendICECandidate(c)
+		p.sendICECandidate(c, "SUBSCRIBER")
 	})
 
 	pc.OnConnectionStateChange(func(state webrtc.PeerConnectionState) {
@@ -635,14 +793,14 @@ func (p *Peer) setupPeerConnection(offerSDP string) error {
 	return nil
 }
 
-func (p *Peer) sendICECandidate(c *webrtc.ICECandidate) {
+func (p *Peer) sendICECandidate(c *webrtc.ICECandidate, target string) {
 	init := c.ToJSON()
 
 	candidate := map[string]any{
 		"candidate":     init.Candidate,
 		"sdpMLineIndex": 0,
 		"sdpMid":        "0",
-		"target":        "SUBSCRIBER",
+		"target":        target,
 	}
 
 	if init.UsernameFragment != nil {
@@ -655,16 +813,12 @@ func (p *Peer) sendICECandidate(c *webrtc.ICECandidate) {
 }
 
 func (p *Peer) handleRemoteICE(data json.RawMessage) {
-	if p.pc == nil {
-		p.log.Warn("received ICE candidate before peer connection")
-		return
-	}
-
 	var candidates []struct {
-		Candidate        string `json:"candidate"`
+		Candidate        string  `json:"candidate"`
 		SDPMLineIndex    *uint16 `json:"sdpMLineIndex"`
 		SDPMid           *string `json:"sdpMid"`
 		UsernameFragment string  `json:"usernameFragment"`
+		Target           string  `json:"target"`
 	}
 
 	if err := json.Unmarshal(data, &candidates); err != nil {
@@ -673,13 +827,25 @@ func (p *Peer) handleRemoteICE(data json.RawMessage) {
 	}
 
 	for _, c := range candidates {
+		var pc *webrtc.PeerConnection
+		switch c.Target {
+		case "PUBLISHER":
+			pc = p.pubPC
+		default:
+			pc = p.pc
+		}
+		if pc == nil {
+			p.log.Warn("received ICE candidate before peer connection", "target", c.Target)
+			continue
+		}
+
 		init := webrtc.ICECandidateInit{
 			Candidate:     c.Candidate,
 			SDPMLineIndex: c.SDPMLineIndex,
 			SDPMid:        c.SDPMid,
 		}
-		if err := p.pc.AddICECandidate(init); err != nil {
-			p.log.Warn("add ICE candidate", "error", err)
+		if err := pc.AddICECandidate(init); err != nil {
+			p.log.Warn("add ICE candidate", "error", err, "target", c.Target)
 		}
 	}
 }
@@ -699,7 +865,7 @@ func (p *Peer) handleRTCPing(data json.RawMessage) {
 	p.sendMediaIn("rtc:pong", map[string]any{
 		"pong_resp": map[string]any{
 			"lastPingTimestamp": fmt.Sprintf("%d", ping.Timestamp),
-			"timestamp":        fmt.Sprintf("%d", now),
+			"timestamp":         fmt.Sprintf("%d", now),
 		},
 	})
 }
@@ -733,5 +899,227 @@ func (p *Peer) pingLoop() {
 				},
 			})
 		}
+	}
+}
+
+func (p *Peer) updateRemoteIdentity(identity, name, state string) {
+	if identity == "" || identity == p.participantIdentity {
+		return
+	}
+
+	p.remoteIdentitiesMu.Lock()
+	defer p.remoteIdentitiesMu.Unlock()
+
+	if p.targetParticipantName != "" {
+		if state != "DISCONNECTED" && name == "" {
+			return
+		}
+		if name != "" && name != p.targetParticipantName {
+			delete(p.remoteIdentities, identity)
+			return
+		}
+	}
+
+	switch state {
+	case "DISCONNECTED":
+		delete(p.remoteIdentities, identity)
+	default:
+		p.remoteIdentities[identity] = struct{}{}
+		if p.targetParticipantName == "" || name == p.targetParticipantName {
+			select {
+			case <-p.targetReadyCh:
+			default:
+				close(p.targetReadyCh)
+			}
+		}
+	}
+}
+
+func (p *Peer) destinationIdentities() []string {
+	p.remoteIdentitiesMu.RLock()
+	defer p.remoteIdentitiesMu.RUnlock()
+
+	if len(p.remoteIdentities) == 0 {
+		return nil
+	}
+
+	identities := make([]string, 0, len(p.remoteIdentities))
+	for identity := range p.remoteIdentities {
+		identities = append(identities, identity)
+	}
+	return identities
+}
+
+func (p *Peer) sendDataChannel() *webrtc.DataChannel {
+	if p.pubDC != nil && p.pubDC.ReadyState() == webrtc.DataChannelStateOpen {
+		return p.pubDC
+	}
+	if p.dc != nil && p.dc.ReadyState() == webrtc.DataChannelStateOpen {
+		return p.dc
+	}
+	return nil
+}
+
+func (p *Peer) handleParticipantJoined(payload json.RawMessage) {
+	var event struct {
+		ParticipantID   string `json:"participantId"`
+		ParticipantName string `json:"participantName"`
+	}
+
+	if err := json.Unmarshal(payload, &event); err != nil {
+		p.log.Debug("unmarshal participant-joined", "error", err)
+		return
+	}
+
+	p.updateRemoteIdentity(event.ParticipantID, event.ParticipantName, "JOINED")
+}
+
+func (p *Peer) handleParticipantLeft(payload json.RawMessage) {
+	var event struct {
+		ParticipantID   string `json:"participantId"`
+		ParticipantName string `json:"participantName"`
+	}
+
+	if err := json.Unmarshal(payload, &event); err != nil {
+		p.log.Debug("unmarshal participant-left", "error", err)
+		return
+	}
+
+	p.updateRemoteIdentity(event.ParticipantID, event.ParticipantName, "DISCONNECTED")
+}
+
+func (p *Peer) startPublisher(ctx context.Context) error {
+	if p.pubPC != nil {
+		return nil
+	}
+
+	config := webrtc.Configuration{
+		ICEServers: p.iceServers,
+	}
+
+	pc, err := webrtc.NewPeerConnection(config)
+	if err != nil {
+		return fmt.Errorf("new publisher peer connection: %w", err)
+	}
+	p.pubPC = pc
+
+	trueVal := true
+	falseVal := false
+	maxRetries := uint16(1)
+
+	lossyDC, err := pc.CreateDataChannel("_lossy", &webrtc.DataChannelInit{
+		Ordered:        &falseVal,
+		MaxRetransmits: &maxRetries,
+	})
+	if err != nil {
+		return fmt.Errorf("create lossy publisher datachannel: %w", err)
+	}
+	lossyDC.OnMessage(p.handleDataChannelMessage)
+
+	reliableDC, err := pc.CreateDataChannel("_reliable", &webrtc.DataChannelInit{
+		Ordered: &trueVal,
+	})
+	if err != nil {
+		return fmt.Errorf("create reliable publisher datachannel: %w", err)
+	}
+	reliableDC.OnOpen(func() {
+		p.log.Info("publisher data channel open", "label", reliableDC.Label())
+		p.pubDC = reliableDC
+		select {
+		case <-p.pubReadyCh:
+		default:
+			close(p.pubReadyCh)
+		}
+	})
+	reliableDC.OnMessage(p.handleDataChannelMessage)
+
+	pc.OnICECandidate(func(c *webrtc.ICECandidate) {
+		if c == nil {
+			return
+		}
+		p.sendICECandidate(c, "PUBLISHER")
+	})
+
+	pc.OnConnectionStateChange(func(state webrtc.PeerConnectionState) {
+		p.log.Info("publisher peer connection state", "state", state.String())
+	})
+
+	trackCID := "{" + uuid.New().String() + "}"
+	track, err := webrtc.NewTrackLocalStaticSample(
+		webrtc.RTPCodecCapability{MimeType: webrtc.MimeTypeOpus, ClockRate: 48000, Channels: 2},
+		trackCID,
+		"olcrtc",
+	)
+	if err != nil {
+		return fmt.Errorf("create publisher track: %w", err)
+	}
+
+	sender, err := pc.AddTrack(track)
+	if err != nil {
+		return fmt.Errorf("add publisher track: %w", err)
+	}
+
+	go func() {
+		buf := make([]byte, 1500)
+		for {
+			if _, _, err := sender.Read(buf); err != nil {
+				return
+			}
+		}
+	}()
+
+	p.pubTrackMu.Lock()
+	p.pubTrackCID = trackCID
+	p.pubTrackPublishedCh = make(chan struct{})
+	p.pubTrackMu.Unlock()
+
+	p.sendMediaIn("rtc:track:add", map[string]any{
+		"addTrackRequest": map[string]any{
+			"cid":    trackCID,
+			"type":   "AUDIO",
+			"source": "MICROPHONE",
+			"muted":  true,
+		},
+	})
+
+	select {
+	case <-p.pubTrackPublishedCh:
+	case <-time.After(10 * time.Second):
+		return fmt.Errorf("timeout waiting for rtc:track:published")
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+
+	offer, err := pc.CreateOffer(nil)
+	if err != nil {
+		return fmt.Errorf("create publisher offer: %w", err)
+	}
+	if err := pc.SetLocalDescription(offer); err != nil {
+		return fmt.Errorf("set publisher local description: %w", err)
+	}
+
+	p.sendMediaIn("rtc:offer", map[string]any{
+		"description": map[string]any{
+			"type": offer.Type.String(),
+			"sdp":  offer.SDP,
+		},
+	})
+
+	return nil
+}
+
+func (p *Peer) handleDataChannelMessage(msg webrtc.DataChannelMessage) {
+	payload, err := DecodeDataPacket(msg.Data)
+	if err != nil {
+		p.log.Warn("decode data packet", "error", err)
+		return
+	}
+
+	p.onDataMu.RLock()
+	fn := p.onData
+	p.onDataMu.RUnlock()
+
+	if fn != nil {
+		fn(payload)
 	}
 }

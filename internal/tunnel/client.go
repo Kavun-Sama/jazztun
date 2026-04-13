@@ -18,14 +18,13 @@ import (
 
 // Client runs a local SOCKS5 proxy and tunnels traffic through transport peers.
 type Client struct {
-	peers   []transport.Transport
-	cipher  *crypto.Cipher
-	mx      *mux.Mux
-	listen  string
+	peers  []transport.Transport
+	cipher *crypto.Cipher
+	mx     *mux.Mux
+	listen string
 
 	clientID uint32
 	nextSID  atomic.Uint32
-	peerIdx  atomic.Uint32
 
 	log *slog.Logger
 }
@@ -143,9 +142,14 @@ func (c *Client) handleConnect(conn net.Conn, host string, port int) {
 	timer := time.NewTimer(15 * time.Second)
 	defer timer.Stop()
 
+	firstFrameCh := make(chan []byte, 1)
+	go func() {
+		firstFrameCh <- stream.Read()
+	}()
+
 	select {
-	case data, ok := <-stream.ReadCh():
-		if !ok {
+	case data := <-firstFrameCh:
+		if data == nil {
 			c.log.Debug("stream closed before confirmation")
 			socks.SendFailure(conn)
 			conn.Close()
@@ -239,34 +243,50 @@ func (c *Client) proxyStream(conn net.Conn, stream *mux.Stream, key mux.StreamKe
 
 // sendFrame encrypts and sends through transport.
 func (c *Client) sendFrame(data []byte) error {
+	if len(c.peers) == 0 {
+		return fmt.Errorf("no transport peers configured")
+	}
+
+	clientID, sid, _, flags, _, err := mux.ParseFrame(data)
+	if err != nil {
+		return fmt.Errorf("parse mux frame: %w", err)
+	}
+
+	if flags&mux.FlagReset != 0 {
+		for _, peer := range c.peers {
+			if err := c.sendFrameToPeer(peer, data); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+
+	return c.sendFrameToPeer(c.peers[c.streamPeerIndex(clientID, sid)], data)
+}
+
+func (c *Client) sendFrameToPeer(peer transport.Transport, data []byte) error {
 	encrypted, err := c.cipher.Encrypt(data)
 	if err != nil {
 		return fmt.Errorf("encrypt: %w", err)
 	}
 
-	c.waitCanSend()
+	tick := time.NewTicker(1 * time.Millisecond)
+	defer tick.Stop()
 
-	idx := int(c.peerIdx.Add(1)-1) % len(c.peers)
-	return c.peers[idx].Send(encrypted)
+	for {
+		if peer.CanSend() {
+			return peer.Send(encrypted)
+		}
+		<-tick.C
+	}
 }
 
-// waitCanSend blocks until at least one peer can accept data,
-// using a channel-based select instead of a sleep loop.
-func (c *Client) waitCanSend() {
-	for _, p := range c.peers {
-		if p.CanSend() {
-			return
-		}
+func (c *Client) streamPeerIndex(clientID uint32, sid uint16) int {
+	if len(c.peers) == 1 {
+		return 0
 	}
-	tick := time.NewTicker(2 * time.Millisecond)
-	defer tick.Stop()
-	for range tick.C {
-		for _, p := range c.peers {
-			if p.CanSend() {
-				return
-			}
-		}
-	}
+	hash := clientID*2654435761 ^ uint32(sid)
+	return int(hash % uint32(len(c.peers)))
 }
 
 // sendReset sends a RESET frame to clear server-side state for this client.

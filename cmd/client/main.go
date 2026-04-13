@@ -23,6 +23,7 @@ func main() {
 	key := flag.String("key", "", "hex 32 bytes encryption key")
 	listen := flag.String("listen", "127.0.0.1:1080", "local SOCKS5 address")
 	duo := flag.Bool("duo", false, "use 2 transport peers in parallel")
+	peersFlag := flag.Int("peers", 0, "number of transport peers to open (overrides -duo)")
 	verbose := flag.Bool("v", false, "verbose logging")
 	flag.Parse()
 
@@ -76,27 +77,32 @@ func main() {
 
 	preResp, err := api.Preconnect(roomID, password)
 	if err != nil {
-		logger.Error("preconnect", "error", err)
-		os.Exit(1)
+		logger.Warn("preconnect failed, using default connector", "error", err, "connectorUrl", jazz.DefaultConnectorURL)
+		preResp = &jazz.PreconnectResponse{
+			ConnectorURL: jazz.DefaultConnectorURL,
+		}
 	}
 
 	// Create transport peers
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	peerCount := 1
-	if *duo {
-		peerCount = 2
+	peerCount, err := resolvePeerCount(*peersFlag, *duo)
+	if err != nil {
+		logger.Error("peer config error", "error", err)
+		os.Exit(1)
 	}
 
 	peers := make([]transport.Transport, 0, peerCount)
 	for i := 0; i < peerCount; i++ {
 		peer := jazz.NewPeer(jazz.PeerConfig{
-			RoomID:       roomID,
-			Password:     password,
-			ConnectorURL: preResp.ConnectorURL,
-			APIClient:    api,
-			Logger:       logger,
+			RoomID:                roomID,
+			Password:              password,
+			ConnectorURL:          preResp.ConnectorURL,
+			APIClient:             api,
+			ParticipantName:       peerName("client", i),
+			TargetParticipantName: peerName("server", i),
+			Logger:                logger,
 		})
 
 		if err := peer.Connect(ctx); err != nil {
@@ -147,4 +153,21 @@ func generateClientID() uint32 {
 	t := uint32(time.Now().Unix()) & 0xFFFF0000
 	r := rand.Uint32() & 0x0000FFFF
 	return t | r
+}
+
+func resolvePeerCount(peers int, duo bool) (int, error) {
+	if peers < 0 {
+		return 0, fmt.Errorf("peers must be >= 0")
+	}
+	if peers > 0 {
+		return peers, nil
+	}
+	if duo {
+		return 2, nil
+	}
+	return 1, nil
+}
+
+func peerName(role string, index int) string {
+	return fmt.Sprintf("olcrtc-%s-%d", role, index+1)
 }

@@ -19,6 +19,7 @@ const (
 	origin    = "https://salutejazz.ru"
 	userAgent = "Mozilla/5.0 (X11; Linux x86_64; rv:135.0) Gecko/20100101 Firefox/135.0"
 	jazzUA    = "osName=Linux;osVersion=6.1;appName=jazz;appVersion=26.21.7;surface=WEB;browserName=Firefox;browserVersion=135.0"
+	DefaultConnectorURL = "wss://ws.salutejazz.ru/connector"
 )
 
 // APIClient handles Jazz REST API calls.
