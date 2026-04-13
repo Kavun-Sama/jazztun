@@ -11,15 +11,20 @@ import (
 
 const (
 	socks5Version = 0x05
+	authVersion   = 0x01
 	cmdConnect    = 0x01
 	atypIPv4      = 0x01
 	atypDomain    = 0x03
 	atypIPv6      = 0x04
 
-	repSuccess         = 0x00
-	repGeneralFailure  = 0x01
-	repHostUnreachable = 0x04
-	repCmdNotSupported = 0x07
+	authMethodNone     = 0x00
+	authMethodUserPass = 0x02
+	authMethodNoAccept = 0xFF
+
+	repSuccess          = 0x00
+	repGeneralFailure   = 0x01
+	repHostUnreachable  = 0x04
+	repCmdNotSupported  = 0x07
 	repAtypNotSupported = 0x08
 )
 
@@ -27,20 +32,32 @@ const (
 // addr is "host:port" format.
 type OnConnectFunc func(conn net.Conn, host string, port int)
 
-// Server is a minimal SOCKS5 server supporting only CONNECT with no auth.
+// AuthConfig enables RFC 1929 username/password authentication.
+type AuthConfig struct {
+	Username string
+	Password string
+}
+
+func (a AuthConfig) enabled() bool {
+	return a.Username != "" || a.Password != ""
+}
+
+// Server is a minimal SOCKS5 server supporting CONNECT and optional RFC 1929 auth.
 type Server struct {
 	listener  net.Listener
 	onConnect OnConnectFunc
+	auth      AuthConfig
 	log       *slog.Logger
 }
 
 // NewServer creates a new SOCKS5 server.
-func NewServer(onConnect OnConnectFunc, logger *slog.Logger) *Server {
+func NewServer(onConnect OnConnectFunc, auth AuthConfig, logger *slog.Logger) *Server {
 	if logger == nil {
 		logger = slog.Default()
 	}
 	return &Server{
 		onConnect: onConnect,
+		auth:      auth,
 		log:       logger.With(slog.String("component", "socks5")),
 	}
 }
@@ -123,23 +140,27 @@ func (s *Server) negotiate(conn net.Conn) error {
 		return fmt.Errorf("read auth methods: %w", err)
 	}
 
-	// We only support NO AUTH (0x00)
-	hasNoAuth := false
-	for _, m := range methods {
-		if m == 0x00 {
-			hasNoAuth = true
-			break
+	selectedMethod := byte(authMethodNoAccept)
+	if s.auth.enabled() {
+		if containsMethod(methods, authMethodUserPass) {
+			selectedMethod = authMethodUserPass
 		}
+	} else if containsMethod(methods, authMethodNone) {
+		selectedMethod = authMethodNone
 	}
 
-	if !hasNoAuth {
-		conn.Write([]byte{socks5Version, 0xFF}) // no acceptable methods
+	if selectedMethod == authMethodNoAccept {
+		conn.Write([]byte{socks5Version, authMethodNoAccept})
 		return fmt.Errorf("no acceptable auth method")
 	}
 
-	// Reply: no auth required
-	_, err := conn.Write([]byte{socks5Version, 0x00})
-	return err
+	if _, err := conn.Write([]byte{socks5Version, selectedMethod}); err != nil {
+		return err
+	}
+	if selectedMethod == authMethodUserPass {
+		return s.handleUserPassAuth(conn)
+	}
+	return nil
 }
 
 // readRequest reads and parses a SOCKS5 CONNECT request.
@@ -243,6 +264,47 @@ func (s *Server) sendReply(conn net.Conn, rep byte) {
 		0, 0,
 	}
 	conn.Write(reply)
+}
+
+func (s *Server) handleUserPassAuth(conn net.Conn) error {
+	header := make([]byte, 2)
+	if _, err := io.ReadFull(conn, header); err != nil {
+		return fmt.Errorf("read userpass header: %w", err)
+	}
+	if header[0] != authVersion {
+		return fmt.Errorf("unsupported auth version: %d", header[0])
+	}
+
+	username := make([]byte, header[1])
+	if _, err := io.ReadFull(conn, username); err != nil {
+		return fmt.Errorf("read username: %w", err)
+	}
+
+	passLen := make([]byte, 1)
+	if _, err := io.ReadFull(conn, passLen); err != nil {
+		return fmt.Errorf("read password length: %w", err)
+	}
+	password := make([]byte, passLen[0])
+	if _, err := io.ReadFull(conn, password); err != nil {
+		return fmt.Errorf("read password: %w", err)
+	}
+
+	if string(username) != s.auth.Username || string(password) != s.auth.Password {
+		_, _ = conn.Write([]byte{authVersion, 0x01})
+		return fmt.Errorf("invalid username or password")
+	}
+
+	_, err := conn.Write([]byte{authVersion, 0x00})
+	return err
+}
+
+func containsMethod(methods []byte, method byte) bool {
+	for _, m := range methods {
+		if m == method {
+			return true
+		}
+	}
+	return false
 }
 
 // FormatAddr formats host and port into a "host:port" string.

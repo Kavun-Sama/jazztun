@@ -14,6 +14,7 @@ import (
 
 	"github.com/Kavun-Sama/jazztun/internal/buildinfo"
 	"github.com/Kavun-Sama/jazztun/internal/crypto"
+	"github.com/Kavun-Sama/jazztun/internal/socks"
 	"github.com/Kavun-Sama/jazztun/internal/transport/jazz"
 	"github.com/Kavun-Sama/jazztun/internal/tunnel"
 )
@@ -22,6 +23,8 @@ func main() {
 	room := flag.String("room", "", "Jazz room URL")
 	key := flag.String("key", "", "hex 32 bytes encryption key")
 	listen := flag.String("listen", "127.0.0.1:1080", "local SOCKS5 address")
+	socksUser := flag.String("socks-user", "", "SOCKS5 username for local proxy auth")
+	socksPass := flag.String("socks-pass", "", "SOCKS5 password for local proxy auth")
 	duo := flag.Bool("duo", false, "use 2 transport peers in parallel")
 	peersFlag := flag.Int("peers", 0, "number of transport peers to open (overrides -duo)")
 	versionFlag := flag.Bool("version", false, "print version and exit")
@@ -47,6 +50,10 @@ func main() {
 	}
 	if *key == "" {
 		logger.Error("key is required (-key flag)")
+		os.Exit(1)
+	}
+	if (*socksUser == "") != (*socksPass == "") {
+		logger.Error("both -socks-user and -socks-pass must be set together")
 		os.Exit(1)
 	}
 
@@ -118,7 +125,11 @@ func main() {
 		Cipher:   cipher,
 		Listen:   *listen,
 		ClientID: clientID,
-		Logger:   logger,
+		SOCKSAuth: socks.AuthConfig{
+			Username: *socksUser,
+			Password: *socksPass,
+		},
+		Logger: logger,
 	})
 
 	logger.Info("starting SOCKS5 proxy",
@@ -132,6 +143,7 @@ func main() {
 		"peersPerRoom", peerCount,
 		"totalPeers", len(peers),
 		"keyPrefix", hex.EncodeToString(keyBytes[:4]),
+		"socksAuth", *socksUser != "",
 	)
 
 	// Handle signals

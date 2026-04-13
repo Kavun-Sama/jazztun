@@ -11,6 +11,7 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 - GitHub Actions CI workflow
 - GitHub Actions release workflow with cross-platform builds and SHA256 checksums
 - Public binary version reporting via `-version`
+- Optional RFC 1929 username/password auth for the local SOCKS5 proxy
 
 ### Changed
 - Project renamed to `jazztun`
@@ -25,3 +26,4 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 - AES-256-GCM frame encryption
 - Credit-based mux flow control
 - Multiple transport peers via `-peers N`
+- Optional RFC 1929 username/password auth for the local SOCKS5 proxy

@@ -22,6 +22,7 @@ type Client struct {
 	cipher *crypto.Cipher
 	mx     *mux.Mux
 	listen string
+	auth   socks.AuthConfig
 
 	clientID uint32
 	nextSID  atomic.Uint32
@@ -31,11 +32,12 @@ type Client struct {
 
 // ClientConfig holds configuration for creating a tunnel client.
 type ClientConfig struct {
-	Peers    []transport.Transport
-	Cipher   *crypto.Cipher
-	Listen   string
-	ClientID uint32
-	Logger   *slog.Logger
+	Peers     []transport.Transport
+	Cipher    *crypto.Cipher
+	Listen    string
+	ClientID  uint32
+	SOCKSAuth socks.AuthConfig
+	Logger    *slog.Logger
 }
 
 // NewClient creates a new tunnel client.
@@ -48,6 +50,7 @@ func NewClient(cfg ClientConfig) *Client {
 		peers:    cfg.Peers,
 		cipher:   cfg.Cipher,
 		listen:   cfg.Listen,
+		auth:     cfg.SOCKSAuth,
 		clientID: cfg.ClientID,
 		log:      cfg.Logger.With(slog.String("component", "tunnel/client")),
 	}
@@ -82,7 +85,7 @@ func (c *Client) Run(ctx context.Context) error {
 	c.sendReset()
 
 	// Start SOCKS5 server
-	socksServer := socks.NewServer(c.onConnect, c.log)
+	socksServer := socks.NewServer(c.onConnect, c.auth, c.log)
 
 	errCh := make(chan error, 1)
 	go func() {

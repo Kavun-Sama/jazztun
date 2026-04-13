@@ -1,6 +1,7 @@
 # jazztun
 
 [![CI](https://github.com/Kavun-Sama/jazztun/actions/workflows/ci.yml/badge.svg)](https://github.com/Kavun-Sama/jazztun/actions/workflows/ci.yml)
+[![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](LICENSE)
 [![Telegram](https://img.shields.io/badge/Telegram-@kkkavun-26A5E4?logo=telegram&logoColor=white)](https://t.me/kkkavun)
 
 A proxy tunnel that routes TCP traffic through [Salute Jazz](https://salutejazz.ru) WebRTC infrastructure. It is meant for cases where classic VPN protocols are easy to detect or block, while browser-based video traffic is still allowed.
@@ -14,6 +15,8 @@ A proxy tunnel that routes TCP traffic through [Salute Jazz](https://salutejazz.
 `jazztun` runs a local SOCKS5 proxy and sends TCP traffic through a Salute Jazz room to a remote server. Your browser or app talks to `127.0.0.1:1080`; the remote host becomes the exit point.
 
 Why this works in places where regular VPNs do not: the transport path looks like a normal browser video session built on Jazz signaling, TURN, and WebRTC DataChannels, not a conventional VPN tunnel.
+
+To reach resources blocked in Russia, the remote server must be outside Russia. When Salute Jazz itself is allowed or explicitly whitelisted in a network, `jazztun` benefits from that allowance.
 
 ### Protocol Flow
 
@@ -39,6 +42,7 @@ Why this works in places where regular VPNs do not: the transport path looks lik
 
 - TCP tunneling over a Salute Jazz room
 - Local SOCKS5 proxy on the client
+- Optional RFC 1929 username/password auth for the local SOCKS5 proxy
 - AES-256-GCM encryption for tunnel frames
 - Multiple parallel transport peers with `-peers N`
 - Per-stream affinity to preserve TCP byte order
@@ -48,11 +52,9 @@ Why this works in places where regular VPNs do not: the transport path looks lik
 
 ### Limitations
 
-- SOCKS5 `CONNECT` only
-- No SOCKS authentication
 - No UDP associate
 - No bind support
-- Transport reconnect resets active streams instead of resuming them
+- Transport reconnect still resets active streams instead of resuming them
 - Access control is effectively the room URL plus the shared key
 
 ### Download
@@ -71,7 +73,8 @@ Requirements:
 
 - Go `1.25` or newer
 - Network access to Salute Jazz signaling and ICE/TURN endpoints
-- A remote host that can reach the TCP targets you want to proxy
+- A remote host outside Russia if you need access to resources blocked from within Russia
+- The remote host must be able to reach the TCP targets you want to proxy
 
 Linux or macOS:
 
@@ -139,6 +142,8 @@ Client:
 - `-room`: room URL
 - `-key`: same 64-character hex key as the server
 - `-listen`: local SOCKS5 listen address, default `127.0.0.1:1080`
+- `-socks-user`: enable RFC 1929 username/password auth for the local SOCKS5 proxy
+- `-socks-pass`: password paired with `-socks-user`
 - `-duo`: shorthand for two transport peers
 - `-peers`: number of transport peers to open; overrides `-duo`
 - `-v`: verbose logging
@@ -230,6 +235,8 @@ Server egress through another SOCKS5 proxy:
 
 Почему это работает там, где обычный VPN режут: транспорт выглядит как обычная browser-сессия видеозвонка на Jazz signaling, TURN и WebRTC DataChannels, а не как классический VPN-туннель.
 
+Чтобы получать доступ к ресурсам, заблокированным в РФ, удалённый сервер должен находиться за пределами РФ. Если сам Salute Jazz в сети доступен или внесён в белый список, `jazztun` получает это преимущество вместе с ним.
+
 ### Схема Протокола
 
 ```text
@@ -254,6 +261,7 @@ Server egress through another SOCKS5 proxy:
 
 - TCP-туннель поверх комнаты Salute Jazz
 - локальный SOCKS5-прокси на клиенте
+- опциональная RFC 1929 username/password auth для локального SOCKS5-прокси
 - AES-256-GCM для кадров туннеля
 - несколько параллельных transport peer-ов через `-peers N`
 - привязка каждого stream к одному peer-у для сохранения порядка TCP-байтов
@@ -263,11 +271,9 @@ Server egress through another SOCKS5 proxy:
 
 ### Ограничения
 
-- поддерживается только SOCKS5 `CONNECT`
-- нет SOCKS-аутентификации
 - нет UDP associate
 - нет bind
-- reconnect транспорта сбрасывает активные потоки вместо resume
+- reconnect транспорта пока сбрасывает активные потоки вместо resume
 - контроль доступа фактически держится на room URL и общем ключе
 
 ### Download
@@ -286,7 +292,7 @@ sha256sum -c checksums.txt
 
 - Go `1.25` или новее
 - сетевой доступ к сигналингу Salute Jazz и ICE/TURN-инфраструктуре
-- удалённая машина, с которой можно достучаться до целевых TCP-хостов
+- удалённая машина за пределами РФ, с которой можно достучаться до целевых TCP-хостов, если нужен доступ к заблокированным в РФ ресурсам
 
 Linux или macOS:
 
@@ -354,6 +360,8 @@ go build -o client.exe .\cmd\client
 - `-room`: один room URL
 - `-key`: тот же 64-символьный hex-ключ, что и у сервера
 - `-listen`: адрес локального SOCKS5, по умолчанию `127.0.0.1:1080`
+- `-socks-user`: включает RFC 1929 username/password auth для локального SOCKS5-прокси
+- `-socks-pass`: пароль для `-socks-user`
 - `-duo`: быстрый режим на два transport peer-а
 - `-peers`: количество transport peer-ов; перекрывает `-duo`
 - `-v`: подробные логи
@@ -378,9 +386,9 @@ go test ./internal/transport/jazz -v
 
 ### Ручная Проверка
 
-1. Запусти `server`.
-2. Запусти `client` с тем же room URL и ключом.
-3. Проверь внешний IP через локальный SOCKS5:
+1. Запустите `server`.
+2. Запустите `client` с тем же room URL и ключом.
+3. Проверьте внешний IP через локальный SOCKS5:
 
 ```powershell
 curl.exe --socks5-hostname 127.0.0.1:1080 https://ifconfig.me/ip
@@ -417,9 +425,9 @@ curl.exe --max-time 15 --socks5-hostname 127.0.0.1:1080 -o NUL -w "speed=%{speed
 
 Туннель поднялся, но трафик не идёт:
 
-- проверь, что ключ на обеих сторонах одинаковый
-- проверь, что приложение использует именно SOCKS5, а не HTTP proxy
-- проверь, что сервер может резолвить и открывать целевой хост
+- проверьте, что ключ на обеих сторонах одинаковый
+- проверьте, что приложение использует именно SOCKS5, а не HTTP proxy
+- проверьте, что сервер может резолвить и открывать целевой хост
 
 Частые reconnect:
 
