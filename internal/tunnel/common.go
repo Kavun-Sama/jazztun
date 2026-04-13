@@ -30,10 +30,14 @@ func sendEncryptedFrame(peer transport.Transport, frameCipher *icrypto.Cipher, d
 			return peer.Send(encrypted)
 		}
 
+		timer := time.NewTimer(backoff)
 		select {
 		case <-peer.Done():
+			if !timer.Stop() {
+				<-timer.C
+			}
 			return fmt.Errorf("transport disconnected before send")
-		case <-time.After(backoff):
+		case <-timer.C:
 		}
 
 		if backoff < 10*time.Millisecond {
