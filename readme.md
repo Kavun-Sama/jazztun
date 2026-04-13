@@ -1,5 +1,7 @@
 # jazztun
 
+[![CI](https://github.com/Kavun-Sama/jazztun/actions/workflows/ci.yml/badge.svg)](https://github.com/Kavun-Sama/jazztun/actions/workflows/ci.yml)
+
 Language: [English](#english) | [Русский](#russian)
 
 ## English

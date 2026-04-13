@@ -1,0 +1,51 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Build binaries
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+
+          build() {
+            local goos="$1"
+            local goarch="$2"
+            local suffix="$3"
+            local ext="$4"
+
+            GOOS="$goos" GOARCH="$goarch" go build -trimpath -ldflags="-s -w" -o "dist/jazztun-client-${suffix}${ext}" ./cmd/client
+            GOOS="$goos" GOARCH="$goarch" go build -trimpath -ldflags="-s -w" -o "dist/jazztun-server-${suffix}${ext}" ./cmd/server
+          }
+
+          build linux amd64 linux-amd64 ""
+          build linux arm64 linux-arm64 ""
+          build windows amd64 windows-amd64 ".exe"
+          build darwin arm64 darwin-arm64 ""
+
+          (
+            cd dist
+            sha256sum * > checksums.txt
+          )
+
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
