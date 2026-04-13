@@ -6,7 +6,7 @@
 
 A proxy tunnel that routes TCP traffic through [Salute Jazz](https://salutejazz.ru) WebRTC infrastructure. It is meant for cases where classic VPN protocols are easy to detect or block, while browser-based video traffic is still allowed.
 
-[🇬🇧 English](#english) | [🇷🇺 Русский](#russian)
+[<img src="https://flagcdn.com/20x15/gb.png" alt="EN"> English](#english) | [<img src="https://flagcdn.com/20x15/ru.png" alt="RU"> Русский](#russian)
 
 ## English
 
