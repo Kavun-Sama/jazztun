@@ -1,54 +1,59 @@
 # jazztun
 
 [![CI](https://github.com/Kavun-Sama/jazztun/actions/workflows/ci.yml/badge.svg)](https://github.com/Kavun-Sama/jazztun/actions/workflows/ci.yml)
+[![Telegram](https://img.shields.io/badge/Telegram-@kkkavun-26A5E4?logo=telegram&logoColor=white)](https://t.me/kkkavun)
 
-Language: [English](#english) | [Русский](#russian)
+A proxy tunnel that routes TCP traffic through [Salute Jazz](https://salutejazz.ru) WebRTC infrastructure. It is meant for cases where classic VPN protocols are easy to detect or block, while browser-based video traffic is still allowed.
+
+[🇬🇧 English](#english) | [🇷🇺 Русский](#russian)
 
 ## English
 
-A proxy tunnel that routes TCP traffic through [Salute Jazz](https://salutejazz.ru) WebRTC infrastructure. Works where conventional VPNs are blocked: the traffic follows the same browser signaling, TURN, and DataChannel path as a video meeting instead of a typical VPN protocol.
+### Description
 
-`jazztun` exposes a local SOCKS5 proxy and forwards TCP traffic through a Salute Jazz room to a remote server process. In practice, your browser or app talks to `127.0.0.1:1080`, and the remote host becomes the tunnel exit point.
+`jazztun` runs a local SOCKS5 proxy and sends TCP traffic through a Salute Jazz room to a remote server. Your browser or app talks to `127.0.0.1:1080`; the remote host becomes the exit point.
 
-Traffic flow:
+Why this works in places where regular VPNs do not: the transport path looks like a normal browser video session built on Jazz signaling, TURN, and WebRTC DataChannels, not a conventional VPN tunnel.
+
+### Protocol Flow
 
 ```text
-[app/browser]
-    -> SOCKS5
-    -> [jazztun client]
-    -> WebRTC DataChannel over Salute Jazz
-    -> [jazztun server]
-    -> target TCP service
+┌────────────────┐     SOCKS5      ┌────────────────┐
+│ Browser / App  ├────────────────►│ jazztun client │
+└────────────────┘                 └──────┬─────────┘
+                                          │
+                                          │ AES-256-GCM encrypted mux frames
+                                          ▼
+                           Salute Jazz signaling + WebRTC DataChannel
+                                          │
+                                          ▼
+                                   ┌──────┴─────────┐
+                                   │ jazztun server │
+                                   └──────┬─────────┘
+                                          │
+                                          ▼
+                                  Remote TCP destination
 ```
 
-Tunnel payloads are encrypted end-to-end with AES-256-GCM before they enter the DataChannel.
-
-### Current Capabilities
+### Features
 
 - TCP tunneling over a Salute Jazz room
 - Local SOCKS5 proxy on the client
-- AES-256-GCM encryption for mux frames
-- Multiple transport peers with `-peers N`
+- AES-256-GCM encryption for tunnel frames
+- Multiple parallel transport peers with `-peers N`
 - Per-stream affinity to preserve TCP byte order
 - Credit-based mux flow control
-- Optional custom DNS server on the remote side
-- Optional upstream SOCKS5 proxy for remote outbound connections
+- Optional custom DNS resolver on the server side
+- Optional upstream SOCKS5 proxy for server egress
 
-### Current Limitations
+### Limitations
 
 - SOCKS5 `CONNECT` only
 - No SOCKS authentication
 - No UDP associate
 - No bind support
 - Transport reconnect resets active streams instead of resuming them
-- No built-in access control beyond the room URL and shared key
-- Best throughput comes from multiple concurrent TCP connections and transport peers, not from one single stream
-
-### Requirements
-
-- Go `1.25` or newer if you build from source
-- Network access to Salute Jazz signaling and ICE/TURN endpoints
-- A remote host that can reach the final TCP targets you want to proxy
+- Access control is effectively the room URL plus the shared key
 
 ### Download
 
@@ -61,6 +66,12 @@ sha256sum -c checksums.txt
 ```
 
 ### Build
+
+Requirements:
+
+- Go `1.25` or newer
+- Network access to Salute Jazz signaling and ICE/TURN endpoints
+- A remote host that can reach the TCP targets you want to proxy
 
 Linux or macOS:
 
@@ -83,9 +94,9 @@ Print the binary version:
 ./client -version
 ```
 
-### Run
+### Quick Start
 
-#### Option 1: Let The Server Create A Room
+#### Option 1: Let the server create a room
 
 Start the server first:
 
@@ -93,7 +104,7 @@ Start the server first:
 ./server -room new -peers 4 -v
 ```
 
-The server creates a room, generates a key if `-key` is omitted, and prints the room URL and key.
+The server will print the room URL and the generated key.
 
 Start the client with the same room URL and key:
 
@@ -101,9 +112,9 @@ Start the client with the same room URL and key:
 .\client.exe -room "https://salutejazz.ru/ROOM?psw=..." -key YOUR_KEY -peers 4 -v
 ```
 
-The local SOCKS5 proxy listens on `127.0.0.1:1080` by default.
+By default, the local SOCKS5 proxy listens on `127.0.0.1:1080`.
 
-#### Option 2: Join An Existing Room
+#### Option 2: Join an existing room
 
 ```bash
 ./server -room "https://salutejazz.ru/ROOM?psw=..." -key YOUR_KEY -peers 4
@@ -118,7 +129,7 @@ Server:
 - `-key`: 64-character hex key; autogenerated if omitted on the server
 - `-duo`: shorthand for two transport peers
 - `-peers`: number of transport peers to open; overrides `-duo`
-- `-dns`: DNS resolver for remote outbound lookups, default `1.1.1.1:53`
+- `-dns`: DNS resolver for remote lookups, default `1.1.1.1:53`
 - `-socks`: upstream SOCKS5 proxy used by the server for outbound dialing
 - `-v`: verbose logging
 - `-version`: print the binary version and exit
@@ -133,9 +144,9 @@ Client:
 - `-v`: verbose logging
 - `-version`: print the binary version and exit
 
-### Test
+### Testing
 
-Run unit tests:
+Run the full validation set:
 
 ```bash
 go test ./...
@@ -150,17 +161,17 @@ go test ./internal/mux -v
 go test ./internal/transport/jazz -v
 ```
 
-### Manual End-To-End Check
+### Manual Check
 
 1. Start `server`.
 2. Start `client` with the same room URL and key.
-3. Verify the exit IP through the local SOCKS5 proxy:
+3. Check the exit IP through the local SOCKS5 proxy:
 
 ```powershell
 curl.exe --socks5-hostname 127.0.0.1:1080 https://ifconfig.me/ip
 ```
 
-If the tunnel works, the reported IP should be the remote server IP.
+If the tunnel is working, the returned IP should be the remote server IP.
 
 ### Bandwidth Test
 
@@ -178,18 +189,10 @@ On the client machine:
 curl.exe --max-time 15 --socks5-hostname 127.0.0.1:1080 -o NUL -w "speed=%{speed_download} bytes/s time=%{time_total}s code=%{http_code}`n" http://SERVER_IP:8088/100m.bin
 ```
 
-To estimate megabits per second:
-
-```text
-Mbit/s = bytes_per_second * 8 / 1,000,000
-```
-
-Current practical results from this codebase:
+Observed throughput on the current codebase:
 
 - single stream: roughly `33-43 Mbit/s`
 - aggregate throughput with `-peers 4` and several parallel downloads: roughly `85-90 Mbit/s`
-
-This is usually enough for normal browsing and `1080p`. `1440p` may work, but stable `4K` should not be assumed.
 
 ### Troubleshooting
 
@@ -199,21 +202,21 @@ Room URL rejected:
 
 Tunnel connects but traffic does not pass:
 
-- verify the key matches on both sides
-- verify the client is using SOCKS5, not HTTP proxy mode
-- verify the server can resolve and reach the target host
+- verify that the key matches on both sides
+- verify that the client is using SOCKS5, not HTTP proxy mode
+- verify that the server can resolve and reach the target host
 
 Frequent reconnects:
 
 - current reconnect behavior is coarse; active streams are reset after transport loss
 
-Remote DNS issues:
+Server-side DNS issues:
 
 ```bash
 ./server -room new -dns 8.8.8.8:53
 ```
 
-Remote egress through another SOCKS5 proxy:
+Server egress through another SOCKS5 proxy:
 
 ```bash
 ./server -room new -socks 127.0.0.1:9050
@@ -221,32 +224,41 @@ Remote egress through another SOCKS5 proxy:
 
 ## Russian
 
-Прокси-туннель, который маршрутизирует TCP-трафик через WebRTC-инфраструктуру [Salute Jazz](https://salutejazz.ru). Работает там, где обычные VPN режут: трафик идёт по тому же browser signaling, TURN и DataChannel пути, что и видеозвонок, а не по характерному VPN-протоколу.
+### Описание
 
-`jazztun` поднимает локальный SOCKS5-прокси и пересылает TCP-трафик через комнату Salute Jazz на удалённый серверный процесс. На практике приложение или браузер подключается к `127.0.0.1:1080`, а удалённая машина становится точкой выхода трафика.
+`jazztun` поднимает локальный SOCKS5-прокси и отправляет TCP-трафик через комнату Salute Jazz на удалённый сервер. Приложение или браузер подключается к `127.0.0.1:1080`, а удалённая машина становится точкой выхода трафика.
 
-Схема трафика:
+Почему это работает там, где обычный VPN режут: транспорт выглядит как обычная browser-сессия видеозвонка на Jazz signaling, TURN и WebRTC DataChannels, а не как классический VPN-туннель.
+
+### Схема Протокола
 
 ```text
-[приложение/браузер]
-    -> SOCKS5
-    -> [jazztun client]
-    -> WebRTC DataChannel через Salute Jazz
-    -> [jazztun server]
-    -> целевой TCP-сервис
+┌────────────────────┐    SOCKS5     ┌────────────────┐
+│ Браузер / программа├──────────────►│ jazztun client │
+└────────────────────┘               └──────┬─────────┘
+                                            │
+                                            │ mux-кадры, зашифрованные AES-256-GCM
+                                            ▼
+                         Salute Jazz signaling + WebRTC DataChannel
+                                            │
+                                            ▼
+                                     ┌──────┴─────────┐
+                                     │ jazztun server │
+                                     └──────┬─────────┘
+                                            │
+                                            ▼
+                                   Удалённый TCP-сервис
 ```
 
-Полезная нагрузка туннеля шифруется end-to-end через AES-256-GCM ещё до попадания в DataChannel.
-
-### Что Сейчас Умеет
+### Возможности
 
 - TCP-туннель поверх комнаты Salute Jazz
 - локальный SOCKS5-прокси на клиенте
-- AES-256-GCM для кадров mux
-- несколько транспортных peer-ов через `-peers N`
+- AES-256-GCM для кадров туннеля
+- несколько параллельных transport peer-ов через `-peers N`
 - привязка каждого stream к одному peer-у для сохранения порядка TCP-байтов
 - credit-based flow control в mux
-- кастомный DNS-резолвер на удалённой стороне
+- кастомный DNS-резолвер на стороне сервера
 - опциональный upstream SOCKS5-прокси для исходящих подключений сервера
 
 ### Ограничения
@@ -256,14 +268,7 @@ Remote egress through another SOCKS5 proxy:
 - нет UDP associate
 - нет bind
 - reconnect транспорта сбрасывает активные потоки вместо resume
-- отдельного контроля доступа нет: фактически защита держится на room URL и общем ключе
-- максимальная пропускная способность лучше раскрывается на нескольких параллельных TCP-соединениях и нескольких peer-ах, а не на одном потоке
-
-### Требования
-
-- Go `1.25` или новее, если собираешь из исходников
-- сетевой доступ к сигналингу Salute Jazz и ICE/TURN-инфраструктуре
-- удалённая машина, с которой можно достучаться до целевых TCP-хостов
+- контроль доступа фактически держится на room URL и общем ключе
 
 ### Download
 
@@ -276,6 +281,12 @@ sha256sum -c checksums.txt
 ```
 
 ### Сборка
+
+Требования:
+
+- Go `1.25` или новее
+- сетевой доступ к сигналингу Salute Jazz и ICE/TURN-инфраструктуре
+- удалённая машина, с которой можно достучаться до целевых TCP-хостов
 
 Linux или macOS:
 
@@ -298,9 +309,9 @@ go build -o client.exe .\cmd\client
 ./client -version
 ```
 
-### Запуск
+### Быстрый Старт
 
-#### Вариант 1: Сервер Сам Создаёт Комнату
+#### Вариант 1: сервер сам создаёт комнату
 
 Сначала запускается сервер:
 
@@ -308,7 +319,7 @@ go build -o client.exe .\cmd\client
 ./server -room new -peers 4 -v
 ```
 
-Сервер создаст комнату, а если `-key` не задан, сам сгенерирует ключ и выведет room URL и ключ.
+Сервер выведет room URL и сгенерированный ключ.
 
 Потом запускается клиент с тем же room URL и ключом:
 
@@ -318,7 +329,7 @@ go build -o client.exe .\cmd\client
 
 По умолчанию локальный SOCKS5 слушает `127.0.0.1:1080`.
 
-#### Вариант 2: Обе Стороны Входят В Уже Существующую Комнату
+#### Вариант 2: вход в уже существующую комнату
 
 ```bash
 ./server -room "https://salutejazz.ru/ROOM?psw=..." -key YOUR_KEY -peers 4
@@ -333,8 +344,8 @@ go build -o client.exe .\cmd\client
 - `-key`: 64-символьный hex-ключ; на сервере может быть сгенерирован автоматически
 - `-duo`: быстрый режим на два transport peer-а
 - `-peers`: количество transport peer-ов; перекрывает `-duo`
-- `-dns`: DNS-резолвер для удалённых исходящих подключений, по умолчанию `1.1.1.1:53`
-- `-socks`: upstream SOCKS5-прокси, через который сервер делает исходящие подключения
+- `-dns`: DNS-резолвер для удалённых lookup, по умолчанию `1.1.1.1:53`
+- `-socks`: upstream SOCKS5-прокси для исходящих подключений сервера
 - `-v`: подробные логи
 - `-version`: вывести версию и завершиться
 
@@ -348,16 +359,16 @@ go build -o client.exe .\cmd\client
 - `-v`: подробные логи
 - `-version`: вывести версию и завершиться
 
-### Тесты
+### Тестирование
 
-Все unit-тесты:
+Полная проверка:
 
 ```bash
 go test ./...
 go vet ./...
 ```
 
-По пакетам:
+Проверка по пакетам:
 
 ```bash
 go test ./internal/crypto -v
@@ -365,7 +376,7 @@ go test ./internal/mux -v
 go test ./internal/transport/jazz -v
 ```
 
-### Ручная End-To-End Проверка
+### Ручная Проверка
 
 1. Запусти `server`.
 2. Запусти `client` с тем же room URL и ключом.
@@ -393,18 +404,10 @@ python3 -m http.server 8088 --directory /root/bench
 curl.exe --max-time 15 --socks5-hostname 127.0.0.1:1080 -o NUL -w "speed=%{speed_download} bytes/s time=%{time_total}s code=%{http_code}`n" http://SERVER_IP:8088/100m.bin
 ```
 
-Перевод в мегабиты в секунду:
-
-```text
-Mbit/s = bytes_per_second * 8 / 1,000,000
-```
-
-Практические результаты на текущем коде:
+Наблюдаемые значения на текущем коде:
 
 - один поток: примерно `33-43 Mbit/s`
 - aggregate throughput на `-peers 4` и нескольких параллельных загрузках: примерно `85-90 Mbit/s`
-
-Обычно этого хватает для обычного веба и `1080p`. `1440p` может работать, но стабильный `4K` на текущей архитектуре закладывать не стоит.
 
 ### Диагностика
 
