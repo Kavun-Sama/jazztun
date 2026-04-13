@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log/slog"
 	"net"
 	"sync"
@@ -75,9 +76,8 @@ func (c *Client) Run(ctx context.Context) error {
 		})
 
 		p.SetOnReconnect(func() {
-			c.log.Info("peer reconnected, resetting mux state")
-			c.mx.CloseAll()
-			c.sendReset()
+			c.log.Info("peer reconnected, replaying mux state")
+			c.mx.OnTransportReconnect()
 		})
 	}
 
@@ -202,24 +202,32 @@ func (c *Client) proxyStream(conn net.Conn, stream *mux.Stream, key mux.StreamKe
 	var once sync.Once
 	cleanup := func() {
 		conn.Close()
-		stream.Close()
 		c.mx.RemoveStream(key)
 	}
 
-	done := make(chan struct{}, 2)
+	type pumpResult struct {
+		graceful bool
+	}
+	done := make(chan pumpResult, 2)
 
 	// conn -> stream
 	go func() {
-		defer func() { done <- struct{}{} }()
 		buf := make([]byte, 32*1024)
 		for {
 			n, err := conn.Read(buf)
 			if n > 0 {
 				if writeErr := stream.Write(buf[:n]); writeErr != nil {
+					done <- pumpResult{}
 					return
 				}
 			}
 			if err != nil {
+				if err == io.EOF {
+					_ = stream.Close()
+					done <- pumpResult{graceful: true}
+					return
+				}
+				done <- pumpResult{}
 				return
 			}
 		}
@@ -227,22 +235,30 @@ func (c *Client) proxyStream(conn net.Conn, stream *mux.Stream, key mux.StreamKe
 
 	// stream -> conn
 	go func() {
-		defer func() { done <- struct{}{} }()
 		for {
 			data := stream.Read()
 			if data == nil {
+				if tcpConn, ok := conn.(*net.TCPConn); ok {
+					_ = tcpConn.CloseWrite()
+				} else {
+					_ = conn.Close()
+				}
+				done <- pumpResult{graceful: true}
 				return
 			}
 			if _, err := conn.Write(data); err != nil {
+				done <- pumpResult{}
 				return
 			}
 		}
 	}()
 
-	// Wait for either side to finish
+	first := <-done
+	if !first.graceful {
+		once.Do(cleanup)
+	}
 	<-done
 	once.Do(cleanup)
-	<-done
 }
 
 // sendFrame encrypts and sends through transport.

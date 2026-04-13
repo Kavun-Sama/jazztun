@@ -758,7 +758,10 @@ func (p *Peer) setupPeerConnection(offerSDP string) error {
 	pc.OnConnectionStateChange(func(state webrtc.PeerConnectionState) {
 		p.log.Info("peer connection state", "state", state.String())
 		switch state {
-		case webrtc.PeerConnectionStateFailed, webrtc.PeerConnectionStateDisconnected, webrtc.PeerConnectionStateClosed:
+		// Disconnected is often transient on WebRTC transports. Keep the current
+		// session alive unless it hard-fails, otherwise a short network flap poisons
+		// the peer's Done channel even if the same PeerConnection recovers.
+		case webrtc.PeerConnectionStateFailed, webrtc.PeerConnectionStateClosed:
 			select {
 			case <-p.doneCh:
 			default:

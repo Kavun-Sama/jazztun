@@ -9,6 +9,8 @@ import (
 
 const (
 	headerSize         = 9 // clientID(4) + sid(2) + length(2) + flags(1)
+	dataHeaderSize     = 8 // seq uint64
+	ackPayloadSize     = 8 // next expected seq uint64
 	maxChunk           = 16 * 1024
 	maxPendingFrames   = 256
 	maxPendingBytes    = 4 * 1024 * 1024
@@ -19,7 +21,13 @@ const (
 	FlagClose        byte = 0x02
 	FlagReset        byte = 0x04
 	FlagWindowUpdate byte = 0x08
+	FlagAck          byte = 0x10
 )
+
+type outgoingFrame struct {
+	seq  uint64
+	data []byte
+}
 
 // StreamKey uniquely identifies a stream by client and stream ID.
 type StreamKey struct {
@@ -36,8 +44,11 @@ type Stream struct {
 
 	mu sync.Mutex
 
-	closed bool
-	cond   *sync.Cond
+	closed       bool
+	remoteClosed bool
+	writeClosed  bool
+	closeSent    bool
+	cond         *sync.Cond
 
 	// pendingIn buffers received chunks until the local TCP side consumes them.
 	pendingIn      [][]byte
@@ -47,6 +58,12 @@ type Stream struct {
 	sendQueue      [][]byte
 	sendQueueBytes int
 	sendWindow     int
+
+	unacked     []outgoingFrame
+	nextSendSeq uint64
+	nextRecvSeq uint64
+	replaying   bool
+	replayPos   int
 }
 
 func newStream(key StreamKey, sendFn func([]byte) error, parent *Mux, logger *slog.Logger) *Stream {
@@ -65,7 +82,7 @@ func newStream(key StreamKey, sendFn func([]byte) error, parent *Mux, logger *sl
 // Returns nil if the stream is closed.
 func (s *Stream) Read() []byte {
 	s.mu.Lock()
-	for len(s.pendingIn) == 0 && !s.closed {
+	for len(s.pendingIn) == 0 && !s.closed && !s.remoteClosed {
 		s.cond.Wait()
 	}
 
@@ -88,30 +105,30 @@ func (s *Stream) Read() []byte {
 	return data
 }
 
-func (s *Stream) enqueueIncoming(data []byte) bool {
+func (s *Stream) nextSendFrame() ([]byte, bool, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	// Block the transport reader here instead of dropping data when the TCP side
-	// is slow. This is the main backpressure point for inbound traffic.
-	for !s.closed && (len(s.pendingIn) >= maxPendingFrames || s.pendingInBytes+len(data) > maxPendingBytes) {
-		s.cond.Wait()
-	}
 	if s.closed {
-		return false
+		return nil, false, false
 	}
 
-	s.pendingIn = append(s.pendingIn, data)
-	s.pendingInBytes += len(data)
-	s.cond.Broadcast()
-	return true
-}
+	if s.replaying {
+		if s.replayPos >= len(s.unacked) {
+			s.replaying = false
+			s.replayPos = 0
+		} else {
+			frame := makeDataFrame(s.Key.ClientID, s.Key.SID, s.unacked[s.replayPos].seq, s.unacked[s.replayPos].data)
+			s.replayPos++
+			hasMore := s.replayPos < len(s.unacked) || len(s.sendQueue) > 0
+			return frame, hasMore, true
+		}
+	}
 
-func (s *Stream) nextSendChunk() ([]byte, bool, bool) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	if s.closed || len(s.sendQueue) == 0 || s.sendWindow <= 0 {
+	if len(s.sendQueue) == 0 || s.sendWindow <= 0 {
+		if s.writeClosed && !s.closeSent && len(s.unacked) == 0 {
+			return MakeFrame(s.Key.ClientID, s.Key.SID, FlagClose, nil), false, true
+		}
 		return nil, false, false
 	}
 
@@ -120,9 +137,8 @@ func (s *Stream) nextSendChunk() ([]byte, bool, bool) {
 	if n > s.sendWindow {
 		n = s.sendWindow
 	}
-	// A chunk may be split across several frames when the peer's advertised
-	// receive window is smaller than the queued payload.
-	sendChunk := chunk[:n]
+	sendChunk := make([]byte, n)
+	copy(sendChunk, chunk[:n])
 
 	if n == len(chunk) {
 		s.sendQueue[0] = nil
@@ -133,10 +149,13 @@ func (s *Stream) nextSendChunk() ([]byte, bool, bool) {
 
 	s.sendQueueBytes -= n
 	s.sendWindow -= n
+	seq := s.nextSendSeq
+	s.nextSendSeq++
+	s.unacked = append(s.unacked, outgoingFrame{seq: seq, data: sendChunk})
 	s.cond.Broadcast()
 
 	hasMore := len(s.sendQueue) > 0 && s.sendWindow > 0
-	return sendChunk, hasMore, true
+	return makeDataFrame(s.Key.ClientID, s.Key.SID, seq, sendChunk), hasMore, true
 }
 
 func (s *Stream) addSendWindow(credit int) bool {
@@ -153,15 +172,113 @@ func (s *Stream) addSendWindow(credit int) bool {
 
 	s.sendWindow += credit
 	s.cond.Broadcast()
-	return len(s.sendQueue) > 0
+	return len(s.sendQueue) > 0 || len(s.unacked) > 0 || (s.writeClosed && !s.closeSent)
+}
+
+func (s *Stream) handleAck(nextExpectedSeq uint64) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if len(s.unacked) == 0 {
+		return len(s.sendQueue) > 0 || (s.writeClosed && !s.closeSent)
+	}
+
+	drop := 0
+	for drop < len(s.unacked) && s.unacked[drop].seq < nextExpectedSeq {
+		s.unacked[drop].data = nil
+		drop++
+	}
+	if drop == 0 {
+		return len(s.sendQueue) > 0 || (s.writeClosed && !s.closeSent)
+	}
+
+	s.unacked = s.unacked[drop:]
+	if s.replaying {
+		if s.replayPos <= drop {
+			s.replayPos = 0
+		} else {
+			s.replayPos -= drop
+		}
+		if len(s.unacked) == 0 {
+			s.replaying = false
+			s.replayPos = 0
+		}
+	}
+
+	s.cond.Broadcast()
+	return s.replaying || len(s.sendQueue) > 0 || (s.writeClosed && !s.closeSent)
+}
+
+func (s *Stream) startReplay() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if s.closed {
+		return false
+	}
+	if len(s.unacked) > 0 {
+		s.replaying = true
+		s.replayPos = 0
+	}
+	return s.replaying || len(s.sendQueue) > 0 || (s.writeClosed && !s.closeSent)
+}
+
+func (s *Stream) receiveData(seq uint64, payload []byte) (delivered bool, nextExpectedSeq uint64) {
+	dataCopy := make([]byte, len(payload))
+	copy(dataCopy, payload)
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if s.closed {
+		return false, s.nextRecvSeq
+	}
+
+	switch {
+	case seq < s.nextRecvSeq:
+		return false, s.nextRecvSeq
+	case seq > s.nextRecvSeq:
+		return false, s.nextRecvSeq
+	}
+
+	// Inbound delivery is lossless: once sequence order matches, stall the
+	// transport reader until local consumers drain enough buffered bytes.
+	for !s.closed && (len(s.pendingIn) >= maxPendingFrames || s.pendingInBytes+len(dataCopy) > maxPendingBytes) {
+		s.cond.Wait()
+	}
+	if s.closed {
+		return false, s.nextRecvSeq
+	}
+
+	s.pendingIn = append(s.pendingIn, dataCopy)
+	s.pendingInBytes += len(dataCopy)
+	s.nextRecvSeq++
+	s.cond.Broadcast()
+	return true, s.nextRecvSeq
 }
 
 func (s *Stream) closeLocal() {
 	s.mu.Lock()
 	if !s.closed {
 		s.closed = true
+		s.remoteClosed = true
+		s.writeClosed = true
 		s.cond.Broadcast()
 	}
+	s.mu.Unlock()
+}
+
+func (s *Stream) closeRemote() {
+	s.mu.Lock()
+	s.remoteClosed = true
+	s.cond.Broadcast()
+	s.mu.Unlock()
+}
+
+func (s *Stream) markCloseSent() {
+	s.mu.Lock()
+	s.closeSent = true
+	s.cond.Broadcast()
 	s.mu.Unlock()
 }
 
@@ -179,10 +296,10 @@ func (s *Stream) Write(data []byte) error {
 		data = data[chunkSize:]
 
 		s.mu.Lock()
-		for !s.closed && s.sendQueueBytes+len(chunk) > maxQueuedSendBytes {
+		for !s.closed && !s.writeClosed && s.sendQueueBytes+len(chunk) > maxQueuedSendBytes {
 			s.cond.Wait()
 		}
-		if s.closed {
+		if s.closed || s.writeClosed {
 			s.mu.Unlock()
 			return fmt.Errorf("stream %d/%d is closed", s.Key.ClientID, s.Key.SID)
 		}
@@ -200,11 +317,15 @@ func (s *Stream) Write(data []byte) error {
 
 // Close sends a CLOSE frame and marks the stream as closed.
 func (s *Stream) Close() error {
-	s.closeLocal()
-
-	frame := MakeFrame(s.Key.ClientID, s.Key.SID, FlagClose, nil)
-	_ = s.sendFn(frame) // best-effort
-
+	s.mu.Lock()
+	if s.closed || s.writeClosed {
+		s.mu.Unlock()
+		return nil
+	}
+	s.writeClosed = true
+	s.cond.Broadcast()
+	s.mu.Unlock()
+	s.mux.schedule(s.Key)
 	return nil
 }
 
@@ -212,7 +333,7 @@ func (s *Stream) Close() error {
 func (s *Stream) IsClosed() bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.closed
+	return s.closed || s.remoteClosed
 }
 
 // Mux is an event-driven multiplexer that routes frames to streams.
@@ -295,6 +416,8 @@ func (m *Mux) HandleFrame(data []byte) {
 		m.handleReset(clientID)
 	case flags&FlagClose != 0:
 		m.handleClose(key)
+	case flags&FlagAck != 0:
+		m.handleAck(key, payload)
 	case flags&FlagWindowUpdate != 0:
 		m.handleWindowUpdate(key, payload)
 	case flags&FlagData != 0:
@@ -310,11 +433,33 @@ func (m *Mux) handleData(key StreamKey, payload []byte) {
 		m.onStream(s)
 	}
 
-	dataCopy := make([]byte, len(payload))
-	copy(dataCopy, payload)
+	seq, data, err := parseDataPayload(payload)
+	if err != nil {
+		m.log.Warn("invalid data payload", "error", err, "clientID", key.ClientID, "sid", key.SID)
+		return
+	}
 
-	if !s.enqueueIncoming(dataCopy) {
-		m.log.Debug("dropping frame for closed stream", "clientID", key.ClientID, "sid", key.SID)
+	delivered, nextExpectedSeq := s.receiveData(seq, data)
+	if err := m.sendAck(key, nextExpectedSeq); err != nil {
+		m.log.Debug("send ack failed", "error", err, "clientID", key.ClientID, "sid", key.SID)
+	}
+	if !delivered {
+		m.log.Debug("frame not delivered", "clientID", key.ClientID, "sid", key.SID, "seq", seq)
+	}
+}
+
+func (m *Mux) handleAck(key StreamKey, payload []byte) {
+	if len(payload) != ackPayloadSize {
+		m.log.Warn("invalid ack payload", "len", len(payload))
+		return
+	}
+
+	s := m.GetStream(key)
+	if s == nil {
+		return
+	}
+	if s.handleAck(binary.BigEndian.Uint64(payload)) {
+		m.schedule(key)
 	}
 }
 
@@ -355,15 +500,8 @@ func (m *Mux) getOrCreateStream(key StreamKey) (*Stream, bool) {
 }
 
 func (m *Mux) handleClose(key StreamKey) {
-	m.mu.Lock()
-	s, ok := m.streams[key]
-	if ok {
-		delete(m.streams, key)
-	}
-	m.mu.Unlock()
-
-	if ok && s != nil {
-		s.closeLocal()
+	if s := m.GetStream(key); s != nil {
+		s.closeRemote()
 	}
 }
 
@@ -394,6 +532,24 @@ func (m *Mux) CloseAll() {
 
 	for _, s := range streams {
 		s.closeLocal()
+	}
+}
+
+// OnTransportReconnect marks streams with in-flight data for replay and wakes the scheduler.
+func (m *Mux) OnTransportReconnect() {
+	m.mu.RLock()
+	keys := make([]StreamKey, 0, len(m.streams))
+	streams := make([]*Stream, 0, len(m.streams))
+	for key, stream := range m.streams {
+		keys = append(keys, key)
+		streams = append(streams, stream)
+	}
+	m.mu.RUnlock()
+
+	for i, stream := range streams {
+		if stream.startReplay() {
+			m.schedule(keys[i])
+		}
 	}
 }
 
@@ -452,17 +608,23 @@ func (m *Mux) scheduleLoop() {
 				continue
 			}
 
-			chunk, hasMore, ok := stream.nextSendChunk()
+			frame, hasMore, ok := stream.nextSendFrame()
 			if !ok {
 				continue
 			}
 
-			frame := MakeFrame(key.ClientID, key.SID, FlagData, chunk)
+			_, _, _, flags, _, err := ParseFrame(frame)
+			if err != nil {
+				m.log.Warn("parse scheduled frame failed", "error", err, "clientID", key.ClientID, "sid", key.SID)
+				continue
+			}
+
 			if err := m.sendFn(frame); err != nil {
 				m.log.Warn("send frame failed", "error", err, "clientID", key.ClientID, "sid", key.SID)
-				stream.closeLocal()
-				m.RemoveStream(key)
 				continue
+			}
+			if flags&FlagClose != 0 {
+				stream.markCloseSent()
 			}
 
 			// Rescheduling after each frame gives other active streams a chance to
@@ -482,6 +644,13 @@ func (m *Mux) sendWindowUpdate(key StreamKey, credit int) error {
 	payload := make([]byte, 4)
 	binary.BigEndian.PutUint32(payload, uint32(credit))
 	frame := MakeFrame(key.ClientID, key.SID, FlagWindowUpdate, payload)
+	return m.sendFn(frame)
+}
+
+func (m *Mux) sendAck(key StreamKey, nextExpectedSeq uint64) error {
+	payload := make([]byte, ackPayloadSize)
+	binary.BigEndian.PutUint64(payload, nextExpectedSeq)
+	frame := MakeFrame(key.ClientID, key.SID, FlagAck, payload)
 	return m.sendFn(frame)
 }
 
@@ -512,4 +681,24 @@ func ParseFrame(data []byte) (clientID uint32, sid uint16, length uint16, flags 
 	}
 	payload = payload[:length]
 	return clientID, sid, length, flags, payload, nil
+}
+
+func makeDataFrame(clientID uint32, sid uint16, seq uint64, data []byte) []byte {
+	return MakeFrame(clientID, sid, FlagData, makeDataPayload(seq, data))
+}
+
+func makeDataPayload(seq uint64, data []byte) []byte {
+	payload := make([]byte, dataHeaderSize+len(data))
+	binary.BigEndian.PutUint64(payload[:dataHeaderSize], seq)
+	copy(payload[dataHeaderSize:], data)
+	return payload
+}
+
+func parseDataPayload(payload []byte) (seq uint64, data []byte, err error) {
+	if len(payload) < dataHeaderSize {
+		return 0, nil, fmt.Errorf("payload too short: %d", len(payload))
+	}
+	seq = binary.BigEndian.Uint64(payload[:dataHeaderSize])
+	data = payload[dataHeaderSize:]
+	return seq, data, nil
 }

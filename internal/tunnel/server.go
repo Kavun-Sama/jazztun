@@ -80,9 +80,8 @@ func (s *Server) Run(ctx context.Context) error {
 		})
 
 		p.SetOnReconnect(func() {
-			s.log.Info("peer reconnected, resetting mux state")
-			s.closeAllConns()
-			s.mx.CloseAll()
+			s.log.Info("peer reconnected, replaying mux state")
+			s.mx.OnTransportReconnect()
 		})
 	}
 
@@ -175,21 +174,30 @@ func (s *Server) handleStream(stream *mux.Stream) {
 	}
 
 	// Bidirectional proxy
-	done := make(chan struct{}, 2)
+	type pumpResult struct {
+		graceful bool
+	}
+	done := make(chan pumpResult, 2)
 
 	// TCP -> Stream
 	go func() {
-		defer func() { done <- struct{}{} }()
 		buf := make([]byte, 32*1024)
 		for {
 			n, err := conn.Read(buf)
 			if n > 0 {
 				if writeErr := s.writeToStream(stream, buf[:n]); writeErr != nil {
 					s.log.Debug("write to stream failed", "error", writeErr)
+					done <- pumpResult{}
 					return
 				}
 			}
 			if err != nil {
+				if err == io.EOF {
+					_ = stream.Close()
+					done <- pumpResult{graceful: true}
+					return
+				}
+				done <- pumpResult{}
 				return
 			}
 		}
@@ -197,22 +205,30 @@ func (s *Server) handleStream(stream *mux.Stream) {
 
 	// Stream -> TCP
 	go func() {
-		defer func() { done <- struct{}{} }()
 		for {
 			data := stream.Read()
 			if data == nil {
+				if tcpConn, ok := conn.(*net.TCPConn); ok {
+					_ = tcpConn.CloseWrite()
+				} else {
+					_ = conn.Close()
+				}
+				done <- pumpResult{graceful: true}
 				return
 			}
 			if _, err := conn.Write(data); err != nil {
+				done <- pumpResult{}
 				return
 			}
 		}
 	}()
 
-	// Wait for either direction to finish, then force the other side to unwind too.
+	first := <-done
+	if !first.graceful {
+		once.Do(cleanup)
+	}
 	<-done
 	once.Do(cleanup)
-	<-done
 }
 
 // writeToStream writes data to a stream, respecting backpressure.
