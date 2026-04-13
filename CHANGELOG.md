@@ -8,16 +8,16 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 ## [Unreleased]
 
 ### Added
-- Multi-room transport manager with `-rooms N`
-- Room list parsing for `-room "url1,url2,..."`
 - GitHub Actions CI workflow
 - GitHub Actions release workflow with cross-platform builds and SHA256 checksums
+- Public binary version reporting via `-version`
 
 ### Changed
 - Project renamed to `jazztun`
 - Module path updated to `github.com/Kavun-Sama/jazztun`
+- README rewritten for the public release and release downloads
 
-## [0.1.0] - 2026-04-13
+## [0.1.0] - 2026-04-14
 
 ### Added
 - Initial public release

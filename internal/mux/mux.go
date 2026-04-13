@@ -39,9 +39,11 @@ type Stream struct {
 	closed bool
 	cond   *sync.Cond
 
+	// pendingIn buffers received chunks until the local TCP side consumes them.
 	pendingIn      [][]byte
 	pendingInBytes int
 
+	// sendQueue + sendWindow implement per-stream flow control on outgoing data.
 	sendQueue      [][]byte
 	sendQueueBytes int
 	sendWindow     int
@@ -90,6 +92,8 @@ func (s *Stream) enqueueIncoming(data []byte) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	// Block the transport reader here instead of dropping data when the TCP side
+	// is slow. This is the main backpressure point for inbound traffic.
 	for !s.closed && (len(s.pendingIn) >= maxPendingFrames || s.pendingInBytes+len(data) > maxPendingBytes) {
 		s.cond.Wait()
 	}
@@ -116,6 +120,8 @@ func (s *Stream) nextSendChunk() ([]byte, bool, bool) {
 	if n > s.sendWindow {
 		n = s.sendWindow
 	}
+	// A chunk may be split across several frames when the peer's advertised
+	// receive window is smaller than the queued payload.
 	sendChunk := chunk[:n]
 
 	if n == len(chunk) {
@@ -459,6 +465,8 @@ func (m *Mux) scheduleLoop() {
 				continue
 			}
 
+			// Rescheduling after each frame gives other active streams a chance to
+			// make progress instead of letting one stream monopolize the transport.
 			if hasMore {
 				m.schedule(key)
 			}

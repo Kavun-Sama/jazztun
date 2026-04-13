@@ -6,10 +6,9 @@ Language: [English](#english) | [Русский](#russian)
 
 ## English
 
-### Overview
+A proxy tunnel that routes TCP traffic through [Salute Jazz](https://salutejazz.ru) WebRTC infrastructure. Works where conventional VPNs are blocked: the traffic follows the same browser signaling, TURN, and DataChannel path as a video meeting instead of a typical VPN protocol.
 
-`jazztun` builds a TCP tunnel over a Salute Jazz WebRTC DataChannel session.
-In practice, the client exposes a local SOCKS5 proxy and forwards TCP traffic through a Salute Jazz room to a remote server process.
+`jazztun` exposes a local SOCKS5 proxy and forwards TCP traffic through a Salute Jazz room to a remote server process. In practice, your browser or app talks to `127.0.0.1:1080`, and the remote host becomes the tunnel exit point.
 
 Traffic flow:
 
@@ -23,16 +22,6 @@ Traffic flow:
 ```
 
 Tunnel payloads are encrypted end-to-end with AES-256-GCM before they enter the DataChannel.
-
-### What The Project Contains
-
-- `cmd/client`: local SOCKS5 endpoint that turns SOCKS `CONNECT` requests into tunnel streams
-- `cmd/server`: remote endpoint that joins the same room and dials outbound TCP targets
-- `internal/transport/jazz`: Salute Jazz API, signaling, WebRTC, and DataChannel transport
-- `internal/mux`: logical stream multiplexing with flow control
-- `internal/crypto`: frame encryption
-- `internal/tunnel`: TCP proxying glue between sockets and mux streams
-- `internal/socks`: minimal SOCKS5 server
 
 ### Current Capabilities
 
@@ -52,14 +41,24 @@ Tunnel payloads are encrypted end-to-end with AES-256-GCM before they enter the 
 - No UDP associate
 - No bind support
 - Transport reconnect resets active streams instead of resuming them
-- No built-in access control beyond room URL and shared key
+- No built-in access control beyond the room URL and shared key
 - Best throughput comes from multiple concurrent TCP connections and transport peers, not from one single stream
 
 ### Requirements
 
-- Go `1.25` or newer
+- Go `1.25` or newer if you build from source
 - Network access to Salute Jazz signaling and ICE/TURN endpoints
 - A remote host that can reach the final TCP targets you want to proxy
+
+### Download
+
+Pre-built binaries for Linux, Windows, and macOS (Apple Silicon) are published on the [Releases page](https://github.com/Kavun-Sama/jazztun/releases).
+
+Each release includes `checksums.txt`. Verify it before running the binaries:
+
+```bash
+sha256sum -c checksums.txt
+```
 
 ### Build
 
@@ -75,6 +74,13 @@ Windows PowerShell:
 ```powershell
 go build -o server.exe .\cmd\server
 go build -o client.exe .\cmd\client
+```
+
+Print the binary version:
+
+```bash
+./server -version
+./client -version
 ```
 
 ### Run
@@ -115,6 +121,7 @@ Server:
 - `-dns`: DNS resolver for remote outbound lookups, default `1.1.1.1:53`
 - `-socks`: upstream SOCKS5 proxy used by the server for outbound dialing
 - `-v`: verbose logging
+- `-version`: print the binary version and exit
 
 Client:
 
@@ -124,6 +131,7 @@ Client:
 - `-duo`: shorthand for two transport peers
 - `-peers`: number of transport peers to open; overrides `-duo`
 - `-v`: verbose logging
+- `-version`: print the binary version and exit
 
 ### Test
 
@@ -131,6 +139,7 @@ Run unit tests:
 
 ```bash
 go test ./...
+go vet ./...
 ```
 
 Package-level examples:
@@ -212,10 +221,9 @@ Remote egress through another SOCKS5 proxy:
 
 ## Russian
 
-### Описание
+Прокси-туннель, который маршрутизирует TCP-трафик через WebRTC-инфраструктуру [Salute Jazz](https://salutejazz.ru). Работает там, где обычные VPN режут: трафик идёт по тому же browser signaling, TURN и DataChannel пути, что и видеозвонок, а не по характерному VPN-протоколу.
 
-`jazztun` строит TCP-туннель поверх комнаты Salute Jazz и WebRTC DataChannel.
-На практике клиент поднимает локальный SOCKS5-прокси и пересылает TCP-трафик через комнату Salute Jazz на удаленный серверный процесс.
+`jazztun` поднимает локальный SOCKS5-прокси и пересылает TCP-трафик через комнату Salute Jazz на удалённый серверный процесс. На практике приложение или браузер подключается к `127.0.0.1:1080`, а удалённая машина становится точкой выхода трафика.
 
 Схема трафика:
 
@@ -228,17 +236,7 @@ Remote egress through another SOCKS5 proxy:
     -> целевой TCP-сервис
 ```
 
-Полезная нагрузка туннеля шифруется end-to-end через AES-256-GCM еще до попадания в DataChannel.
-
-### Что Есть В Проекте
-
-- `cmd/client`: локальная точка входа SOCKS5, превращающая `CONNECT` в потоки туннеля
-- `cmd/server`: удаленная сторона, входящая в ту же комнату и открывающая исходящие TCP-подключения
-- `internal/transport/jazz`: API Salute Jazz, сигналинг, WebRTC и транспорт DataChannel
-- `internal/mux`: мультиплексирование логических потоков с flow control
-- `internal/crypto`: шифрование кадров
-- `internal/tunnel`: связка между сокетами и mux-потоками
-- `internal/socks`: минимальный SOCKS5-сервер
+Полезная нагрузка туннеля шифруется end-to-end через AES-256-GCM ещё до попадания в DataChannel.
 
 ### Что Сейчас Умеет
 
@@ -248,7 +246,7 @@ Remote egress through another SOCKS5 proxy:
 - несколько транспортных peer-ов через `-peers N`
 - привязка каждого stream к одному peer-у для сохранения порядка TCP-байтов
 - credit-based flow control в mux
-- кастомный DNS-резолвер на удаленной стороне
+- кастомный DNS-резолвер на удалённой стороне
 - опциональный upstream SOCKS5-прокси для исходящих подключений сервера
 
 ### Ограничения
@@ -263,9 +261,19 @@ Remote egress through another SOCKS5 proxy:
 
 ### Требования
 
-- Go `1.25` или новее
-- сетевой доступ к сигналингу Salute Jazz и к ICE/TURN-инфраструктуре
-- удаленная машина, с которой можно достучаться до целевых TCP-хостов
+- Go `1.25` или новее, если собираешь из исходников
+- сетевой доступ к сигналингу Salute Jazz и ICE/TURN-инфраструктуре
+- удалённая машина, с которой можно достучаться до целевых TCP-хостов
+
+### Download
+
+Готовые бинарники для Linux, Windows и macOS (Apple Silicon) публикуются на [странице релизов](https://github.com/Kavun-Sama/jazztun/releases).
+
+В каждом релизе есть `checksums.txt`. Перед запуском лучше проверить контрольные суммы:
+
+```bash
+sha256sum -c checksums.txt
+```
 
 ### Сборка
 
@@ -283,9 +291,16 @@ go build -o server.exe .\cmd\server
 go build -o client.exe .\cmd\client
 ```
 
+Вывести версию бинарника:
+
+```bash
+./server -version
+./client -version
+```
+
 ### Запуск
 
-#### Вариант 1: Сервер Сам Создает Комнату
+#### Вариант 1: Сервер Сам Создаёт Комнату
 
 Сначала запускается сервер:
 
@@ -318,9 +333,10 @@ go build -o client.exe .\cmd\client
 - `-key`: 64-символьный hex-ключ; на сервере может быть сгенерирован автоматически
 - `-duo`: быстрый режим на два transport peer-а
 - `-peers`: количество transport peer-ов; перекрывает `-duo`
-- `-dns`: DNS-резолвер для удаленных исходящих подключений, по умолчанию `1.1.1.1:53`
+- `-dns`: DNS-резолвер для удалённых исходящих подключений, по умолчанию `1.1.1.1:53`
 - `-socks`: upstream SOCKS5-прокси, через который сервер делает исходящие подключения
 - `-v`: подробные логи
+- `-version`: вывести версию и завершиться
 
 Клиент:
 
@@ -330,6 +346,7 @@ go build -o client.exe .\cmd\client
 - `-duo`: быстрый режим на два transport peer-а
 - `-peers`: количество transport peer-ов; перекрывает `-duo`
 - `-v`: подробные логи
+- `-version`: вывести версию и завершиться
 
 ### Тесты
 
@@ -337,6 +354,7 @@ go build -o client.exe .\cmd\client
 
 ```bash
 go test ./...
+go vet ./...
 ```
 
 По пакетам:
@@ -357,11 +375,11 @@ go test ./internal/transport/jazz -v
 curl.exe --socks5-hostname 127.0.0.1:1080 https://ifconfig.me/ip
 ```
 
-Если туннель работает, вернется IP удаленного сервера.
+Если туннель работает, вернётся IP удалённого сервера.
 
 ### Тест Пропускной Способности
 
-На удаленном сервере:
+На удалённом сервере:
 
 ```bash
 mkdir -p /root/bench
@@ -394,7 +412,7 @@ Mbit/s = bytes_per_second * 8 / 1,000,000
 
 - нужен полный invite link, включая `?psw=...`
 
-Туннель поднялся, но трафик не идет:
+Туннель поднялся, но трафик не идёт:
 
 - проверь, что ключ на обеих сторонах одинаковый
 - проверь, что приложение использует именно SOCKS5, а не HTTP proxy

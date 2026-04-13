@@ -11,6 +11,7 @@ import (
 	"os/signal"
 	"syscall"
 
+	"github.com/Kavun-Sama/jazztun/internal/buildinfo"
 	"github.com/Kavun-Sama/jazztun/internal/crypto"
 	"github.com/Kavun-Sama/jazztun/internal/transport/jazz"
 	"github.com/Kavun-Sama/jazztun/internal/tunnel"
@@ -21,10 +22,16 @@ func main() {
 	key := flag.String("key", "", "hex 32 bytes encryption key (if empty, generate and print)")
 	duo := flag.Bool("duo", false, "use 2 transport peers in parallel")
 	peersFlag := flag.Int("peers", 0, "number of transport peers to open (overrides -duo)")
+	versionFlag := flag.Bool("version", false, "print version and exit")
 	dns := flag.String("dns", "1.1.1.1:53", "DNS server")
 	socksProxy := flag.String("socks", "", "upstream SOCKS5 proxy addr:port")
 	verbose := flag.Bool("v", false, "verbose logging")
 	flag.Parse()
+
+	if *versionFlag {
+		fmt.Println(buildinfo.Version)
+		return
+	}
 
 	// Setup logging
 	logLevel := slog.LevelInfo
@@ -84,12 +91,14 @@ func main() {
 	}
 
 	logger.Info("all peers connected",
+		"version", buildinfo.Version,
 		"roomId", roomSpec.RoomID,
 		"roomURL", roomSpec.URL,
 		"peersPerRoom", peerCount,
 		"totalPeers", len(peers),
 	)
 	logger.Info("jazztun server ready",
+		"version", buildinfo.Version,
 		"roomId", roomSpec.RoomID,
 		"peersPerRoom", peerCount,
 		"totalPeers", len(peers),

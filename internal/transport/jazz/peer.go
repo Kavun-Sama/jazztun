@@ -129,6 +129,8 @@ func (p *Peer) Connect(ctx context.Context) error {
 
 	select {
 	case <-p.readyCh:
+		// Jazz exposes the subscriber data channel first. We also bring up a
+		// publisher-side channel so the peer can send over whichever path is ready.
 		p.log.Info("data channel ready")
 		if err := p.startPublisher(ctx); err != nil {
 			p.log.Warn("publisher setup failed", "error", err)
@@ -912,6 +914,8 @@ func (p *Peer) updateRemoteIdentity(identity, name, state string) {
 	defer p.remoteIdentitiesMu.Unlock()
 
 	if p.targetParticipantName != "" {
+		// In paired mode each peer only talks to its counterpart. Ignore unrelated
+		// room participants so packets are addressed to a single remote identity.
 		if state != "DISCONNECTED" && name == "" {
 			return
 		}
@@ -1046,6 +1050,8 @@ func (p *Peer) startPublisher(ctx context.Context) error {
 	})
 
 	trackCID := "{" + uuid.New().String() + "}"
+	// Jazz expects a published media track before the publisher-side reliable
+	// data channel becomes usable. A muted Opus track is enough to unlock it.
 	track, err := webrtc.NewTrackLocalStaticSample(
 		webrtc.RTPCodecCapability{MimeType: webrtc.MimeTypeOpus, ClockRate: 48000, Channels: 2},
 		trackCID,

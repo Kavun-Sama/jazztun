@@ -14,6 +14,7 @@ func streamPeerIndex(peerCount int, clientID uint32, sid uint16) int {
 	if peerCount <= 1 {
 		return 0
 	}
+	// Keep one logical TCP stream pinned to one transport peer so frames stay ordered.
 	hash := clientID*2654435761 ^ uint32(sid)
 	return int(hash % uint32(peerCount))
 }
@@ -30,6 +31,8 @@ func sendEncryptedFrame(peer transport.Transport, frameCipher *icrypto.Cipher, d
 			return peer.Send(encrypted)
 		}
 
+		// The transport only exposes a polling-style backpressure signal,
+		// so we back off instead of spin-waiting on BufferedAmount.
 		timer := time.NewTimer(backoff)
 		select {
 		case <-peer.Done():

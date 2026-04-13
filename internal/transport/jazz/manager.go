@@ -96,6 +96,8 @@ func (m *Manager) ConnectAll(ctx context.Context) ([]transport.Transport, error)
 				return fmt.Errorf("connect peer %d: %w", peerIndex+1, err)
 			}
 
+			// Each peer owns its own reconnect loop; the tunnel layer only sees
+			// a flat slice of transports.
 			go peer.WatchConnection(groupCtx)
 			peers[peerIndex] = peer
 			return nil

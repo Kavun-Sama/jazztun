@@ -12,6 +12,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/Kavun-Sama/jazztun/internal/buildinfo"
 	"github.com/Kavun-Sama/jazztun/internal/crypto"
 	"github.com/Kavun-Sama/jazztun/internal/transport/jazz"
 	"github.com/Kavun-Sama/jazztun/internal/tunnel"
@@ -23,8 +24,14 @@ func main() {
 	listen := flag.String("listen", "127.0.0.1:1080", "local SOCKS5 address")
 	duo := flag.Bool("duo", false, "use 2 transport peers in parallel")
 	peersFlag := flag.Int("peers", 0, "number of transport peers to open (overrides -duo)")
+	versionFlag := flag.Bool("version", false, "print version and exit")
 	verbose := flag.Bool("v", false, "verbose logging")
 	flag.Parse()
+
+	if *versionFlag {
+		fmt.Println(buildinfo.Version)
+		return
+	}
 
 	// Setup logging
 	logLevel := slog.LevelInfo
@@ -96,6 +103,7 @@ func main() {
 	}
 
 	logger.Info("all peers connected",
+		"version", buildinfo.Version,
 		"roomId", roomSpec.RoomID,
 		"peersPerRoom", peerCount,
 		"totalPeers", len(peers),
@@ -118,6 +126,7 @@ func main() {
 		"clientID", fmt.Sprintf("%08x", clientID),
 	)
 	logger.Info("jazztun ready",
+		"version", buildinfo.Version,
 		"listen", *listen,
 		"roomId", roomSpec.RoomID,
 		"peersPerRoom", peerCount,

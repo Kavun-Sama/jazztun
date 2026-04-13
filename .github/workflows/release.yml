@@ -24,6 +24,7 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p dist
+          ldflags="-s -w -X github.com/Kavun-Sama/jazztun/internal/buildinfo.Version=${GITHUB_REF_NAME}"
 
           build() {
             local goos="$1"
@@ -31,8 +32,8 @@ jobs:
             local suffix="$3"
             local ext="$4"
 
-            GOOS="$goos" GOARCH="$goarch" go build -trimpath -ldflags="-s -w" -o "dist/jazztun-client-${suffix}${ext}" ./cmd/client
-            GOOS="$goos" GOARCH="$goarch" go build -trimpath -ldflags="-s -w" -o "dist/jazztun-server-${suffix}${ext}" ./cmd/server
+            GOOS="$goos" GOARCH="$goarch" go build -trimpath -ldflags="$ldflags" -o "dist/jazztun-client-${suffix}${ext}" ./cmd/client
+            GOOS="$goos" GOARCH="$goarch" go build -trimpath -ldflags="$ldflags" -o "dist/jazztun-server-${suffix}${ext}" ./cmd/server
           }
 
           build linux amd64 linux-amd64 ""
