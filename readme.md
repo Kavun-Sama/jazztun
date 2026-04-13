@@ -1,7 +1,13 @@
-# olcrtc
+# Salute Jazz RTC Tunnel (`olcrtc`)
 
-`olcrtc` builds a TCP tunnel over SaluteJazz WebRTC DataChannel sessions.
-In practice, the project gives you a local SOCKS5 proxy on the client side and forwards its TCP traffic through a SaluteJazz room to a remote server process.
+Language: [English](#english) | [Русский](#russian)
+
+## English
+
+### Overview
+
+`olcrtc` builds a TCP tunnel over Salute Jazz WebRTC DataChannel sessions.
+In practice, the client exposes a local SOCKS5 proxy and forwards TCP traffic through a Salute Jazz room to a remote server process.
 
 Traffic flow:
 
@@ -9,314 +15,123 @@ Traffic flow:
 [app/browser]
     -> SOCKS5
     -> [olcrtc client]
-    -> WebRTC DataChannel over SaluteJazz
+    -> WebRTC DataChannel over Salute Jazz
     -> [olcrtc server]
     -> target TCP service
 ```
 
-The tunnel payload is encrypted end-to-end with AES-256-GCM before it enters the DataChannel.
+Tunnel payloads are encrypted end-to-end with AES-256-GCM before they enter the DataChannel.
 
-## Кратко По-Русски
+### What The Project Contains
 
-`olcrtc` это TCP-туннель поверх комнат Salute Jazz и WebRTC DataChannel.
+- `cmd/client`: local SOCKS5 endpoint that turns SOCKS `CONNECT` requests into tunnel streams
+- `cmd/server`: remote endpoint that joins the same room and dials outbound TCP targets
+- `internal/transport/jazz`: Salute Jazz API, signaling, WebRTC, and DataChannel transport
+- `internal/mux`: logical stream multiplexing with flow control
+- `internal/crypto`: frame encryption
+- `internal/tunnel`: TCP proxying glue between sockets and mux streams
+- `internal/socks`: minimal SOCKS5 server
 
-По сути:
+### Current Capabilities
 
-- `server` запускается на удалённой машине и делает исходящие TCP-подключения
-- `client` поднимает локальный SOCKS5-прокси
-- трафик идёт так: приложение -> SOCKS5 -> `client` -> Salute Jazz/WebRTC -> `server` -> целевой хост
-
-Что уже важно знать:
-
-- проект рассчитан на TCP, не на UDP
-- лучшее практическое применение сейчас это проксирование браузера, `curl`, пакетных загрузок и обычных TCP-клиентов
-- `-peers N` увеличивает прежде всего суммарную пропускную способность при нескольких одновременных соединениях
-- один TCP stream не размазывается по нескольким peer-ам, чтобы не ломать порядок байтов
-
-Быстрый запуск:
-
-1. На сервере:
-```bash
-./server -room new -peers 4 -v
-```
-
-2. На клиенте:
-```powershell
-.\client.exe -room "https://salutejazz.ru/ROOM?psw=..." -key YOUR_KEY -peers 4 -v
-```
-
-3. Проверка:
-```powershell
-curl.exe --socks5-hostname 127.0.0.1:1080 https://ifconfig.me/ip
-```
-
-Тест скорости:
-
-1. На сервере:
-```bash
-mkdir -p /root/bench
-dd if=/dev/zero of=/root/bench/100m.bin bs=1M count=100 status=none
-python3 -m http.server 8088 --directory /root/bench
-```
-
-2. На клиенте:
-```powershell
-curl.exe --max-time 15 --socks5-hostname 127.0.0.1:1080 -o NUL -w "speed=%{speed_download} bytes/s time=%{time_total}s code=%{http_code}`n" http://SERVER_IP:8088/100m.bin
-```
-
-Текущий практический результат по проекту:
-
-- single-stream: примерно до `33-43 Mbit/s`
-- aggregate на `-peers 4` и нескольких параллельных потоках: примерно до `85-90 Mbit/s`
-
-Что это значит:
-
-- `1080p` должно работать нормально
-- `1440p` возможно, но без гарантии на любом ролике
-- стабильные `100+ Mbit/s` в текущей архитектуре не подтверждены
-
-## What The Project Does
-
-The project has two binaries:
-
-- `cmd/server`: joins or creates a SaluteJazz room, accepts encrypted multiplexed streams from peers, and dials outbound TCP targets.
-- `cmd/client`: joins the same room, exposes a local SOCKS5 proxy, and forwards each SOCKS `CONNECT` request into the tunnel.
-
-Internally the project is split into a few simple layers:
-
-- `internal/transport/jazz`: talks to SaluteJazz REST and WebSocket APIs, establishes a WebRTC peer, and sends raw DataChannel payloads.
-- `internal/crypto`: encrypts every mux frame with AES-256-GCM.
-- `internal/mux`: multiplexes many logical TCP streams over one or more transport peers.
-- `internal/socks`: minimal SOCKS5 server used by the client.
-- `internal/tunnel`: glue between mux streams and real TCP sockets.
-
-## How It Works
-
-Startup sequence:
-
-1. Server and client parse the room URL and shared key.
-2. Both call SaluteJazz `preconnect` to obtain the WebSocket connector URL.
-3. `internal/transport/jazz` joins the room, receives ICE config and SDP offer, creates a Pion `PeerConnection`, and opens the `_reliable` DataChannel exposed by the room backend.
-4. The client starts a local SOCKS5 server.
-5. Each SOCKS `CONNECT` request becomes a new mux stream.
-6. The first frame on a stream is a JSON `ConnectRequest` containing destination host and port.
-7. The server dials the remote TCP target and sends a one-byte success marker back.
-8. Both sides proxy data until either side closes the stream.
-
-## Current Capabilities
-
-- TCP tunneling only
+- TCP tunneling over Salute Jazz rooms
 - Local SOCKS5 proxy on the client
-- AES-256-GCM payload encryption
-- Multiple logical streams over one transport
-- Optional `-duo` mode with two parallel transport peers
-- Configurable `-peers N` mode for multiple parallel transport peers
-- Automatic reconnect attempts for the Jazz transport
-- Optional custom DNS resolver on the server
-- Optional upstream SOCKS5 proxy on the server side for outbound dialing
+- AES-256-GCM encryption for mux frames
+- Multiple transport peers with `-peers N`
+- Per-stream affinity to preserve TCP byte order
+- Credit-based mux flow control
+- Optional custom DNS server on the remote side
+- Optional upstream SOCKS5 proxy for remote outbound connections
 
-## Current Limitations
+### Current Limitations
 
-These are actual constraints from the current codebase:
-
-- Only SOCKS5 `CONNECT` is supported
+- SOCKS5 `CONNECT` only
 - No SOCKS authentication
 - No UDP associate
 - No bind support
-- Reconnect resets active mux streams instead of resuming them
-- No built-in access control beyond possession of the room URL and shared key
-- No end-to-end integration test suite in the repo yet
-- Multi-peer mode works best when client and server use the same `-peers` value
+- Transport reconnect resets active streams instead of resuming them
+- No built-in access control beyond room URL and shared key
+- Best throughput comes from multiple concurrent TCP connections, not from one single stream
 
-## Requirements
+### Requirements
 
-- Go 1.23 or newer
-- Network access to:
-  - `bk.salutejazz.ru`
-  - `ws.salutejazz.ru`
-  - the ICE/TURN infrastructure returned by SaluteJazz
-- A machine for the server that can reach the final TCP targets you want to proxy to
+- Go `1.25` or newer
+- Network access to Salute Jazz signaling and ICE/TURN endpoints
+- A remote host that can reach the final TCP targets you want to proxy
 
-## Build
+### Build
 
-From the `olcrtc` directory:
+Linux or macOS:
 
 ```bash
 go build -o server ./cmd/server
 go build -o client ./cmd/client
 ```
 
-On Windows:
+Windows PowerShell:
 
 ```powershell
 go build -o server.exe .\cmd\server
 go build -o client.exe .\cmd\client
 ```
 
-## Run
+### Run
 
-There are two normal ways to start the system.
-
-### Option 1: Server Creates A Fresh Room
+#### Option 1: Let The Server Create A Room
 
 Start the server first:
 
 ```bash
-./server -room new
+./server -room new -peers 4 -v
 ```
 
-The server will:
+The server creates a room, generates a key if `-key` is omitted, and prints the room link and key.
 
-- create a new SaluteJazz room
-- generate a random 32-byte key if `-key` was not provided
-- print the generated key to stderr
-- log the room URL and room password
+Start the client with the same room URL and key:
 
-Take the room URL and the printed hex key, then start the client:
+```powershell
+.\client.exe -room "https://salutejazz.ru/ROOM?psw=..." -key YOUR_KEY -peers 4 -v
+```
+
+The local SOCKS5 proxy listens on `127.0.0.1:1080` by default.
+
+#### Option 2: Join An Existing Room
 
 ```bash
-./client -room "https://salutejazz.ru/abc123?psw=..." -key 0123abcd...
+./server -room "https://salutejazz.ru/ROOM?psw=..." -key YOUR_KEY -peers 4
+./client -room "https://salutejazz.ru/ROOM?psw=..." -key YOUR_KEY -peers 4
 ```
 
-After that, point your application to the local SOCKS5 proxy:
+### Flags
 
-```text
-127.0.0.1:1080
-```
+Server:
 
-### Option 2: Both Sides Join An Existing Room
+- `-room`: full room URL or `new`
+- `-key`: 64-character hex key; autogenerated if omitted on the server
+- `-duo`: shorthand for two transport peers
+- `-peers`: number of transport peers to open; overrides `-duo`
+- `-dns`: DNS resolver for remote outbound lookups, default `1.1.1.1:53`
+- `-socks`: upstream SOCKS5 proxy used by the server for outbound dialing
+- `-v`: verbose logging
 
-If you already have a SaluteJazz invite link with `psw=...` and a shared 32-byte hex key:
+Client:
 
-```bash
-./server -room "https://salutejazz.ru/abc123?psw=..." -key 0123abcd...
-./client -room "https://salutejazz.ru/abc123?psw=..." -key 0123abcd...
-```
-
-## Flags
-
-### Server Flags
-
-- `-room`: required; either a full room URL or `new`
-- `-key`: optional; 64 hex chars, autogenerated if omitted
-- `-duo`: open two transport peers in parallel
-- `-peers`: open `N` transport peers in parallel; overrides `-duo`
-- `-dns`: custom DNS server for outbound lookups, default `1.1.1.1:53`
-- `-socks`: upstream SOCKS5 proxy used by the server for outbound TCP connects
-- `-v`: enable debug logging
-
-Examples:
-
-```bash
-./server -room new -v
-./server -room new -dns 8.8.8.8:53
-./server -room new -socks 127.0.0.1:9050
-./server -room new -duo
-./server -room new -peers 4
-./server -room "https://salutejazz.ru/abc123?psw=..." -key 0123abcd...
-```
-
-### Client Flags
-
-- `-room`: required; full room URL
-- `-key`: required; same 32-byte hex key as the server
+- `-room`: full room URL
+- `-key`: same 64-character hex key as the server
 - `-listen`: local SOCKS5 listen address, default `127.0.0.1:1080`
-- `-duo`: open two transport peers in parallel
-- `-peers`: open `N` transport peers in parallel; overrides `-duo`
-- `-v`: enable debug logging
+- `-duo`: shorthand for two transport peers
+- `-peers`: number of transport peers to open; overrides `-duo`
+- `-v`: verbose logging
 
-Examples:
+### Test
 
-```bash
-./client -room "https://salutejazz.ru/abc123?psw=..." -key 0123abcd...
-./client -room "https://salutejazz.ru/abc123?psw=..." -key 0123abcd... -listen 0.0.0.0:1080
-./client -room "https://salutejazz.ru/abc123?psw=..." -key 0123abcd... -duo
-./client -room "https://salutejazz.ru/abc123?psw=..." -key 0123abcd... -peers 4
-```
-
-## Typical Usage Example
-
-1. Run `server`.
-2. Copy the room URL and key.
-3. Run `client` with the same values.
-4. Configure a program to use SOCKS5 at `127.0.0.1:1080`.
-5. Open a TCP-based destination through that proxy.
-
-Quick verification examples:
-
-```bash
-curl --socks5-hostname 127.0.0.1:1080 https://example.com
-curl --proxy socks5h://127.0.0.1:1080 https://ifconfig.me
-```
-
-Browser-based tooling can also use the local SOCKS5 proxy if the browser is configured accordingly.
-
-In multi-peer mode, each logical mux stream is pinned to one transport peer to preserve TCP byte order.
-This means `-peers` mainly improves aggregate throughput across multiple simultaneous connections, not the speed of a single TCP stream.
-
-## Protocol Notes
-
-### Mux Frame Format
-
-Every logical tunnel frame uses:
-
-```text
-[clientID uint32][sid uint16][length uint16][flags uint8][data...]
-```
-
-Flags:
-
-- `0x01`: data
-- `0x02`: close stream
-- `0x04`: reset all streams for a client ID
-
-The mux layer chunks large writes automatically.
-
-### Stream Setup
-
-The first payload on a new stream is JSON:
-
-```json
-{
-  "cmd": "connect",
-  "addr": "example.com",
-  "port": 443
-}
-```
-
-If the server succeeds in dialing the destination, it replies with one byte `0x00`.
-
-### Encryption
-
-- algorithm: AES-256-GCM
-- key size: 32 bytes
-- nonce: random 12 bytes per frame
-- wire format: `[nonce][ciphertext+tag]`
-
-### Jazz Transport
-
-The transport layer:
-
-- calls the SaluteJazz REST API to create or preconnect rooms
-- joins the WebSocket signaling channel
-- handles `rtc:config`, `rtc:join`, `rtc:offer`, `rtc:ice`, and ping/pong events
-- wraps DataChannel payloads in LiveKit `DataPacket` protobuf format
-
-## Testing
-
-Unit tests exist for the most self-contained internals:
-
-- `internal/crypto`
-- `internal/mux`
-- `internal/transport/jazz` packet encoding
-
-Run all tests:
+Run unit tests:
 
 ```bash
 go test ./...
 ```
 
-Run a specific package:
+Package-level examples:
 
 ```bash
 go test ./internal/crypto -v
@@ -324,41 +139,21 @@ go test ./internal/mux -v
 go test ./internal/transport/jazz -v
 ```
 
-If you want a fast rebuild plus test cycle:
+### Manual End-To-End Check
 
-```bash
-go test ./... && go build ./cmd/server && go build ./cmd/client
-```
-
-On Windows PowerShell:
+1. Start `server`.
+2. Start `client` with the same room URL and key.
+3. Verify the exit IP through the local SOCKS5 proxy:
 
 ```powershell
-go test ./...
-go build -o server.exe .\cmd\server
-go build -o client.exe .\cmd\client
+curl.exe --socks5-hostname 127.0.0.1:1080 https://ifconfig.me/ip
 ```
 
-## Manual End-To-End Test
+If the tunnel works, the reported IP should be the remote server IP.
 
-Because the repository currently has no integration harness, the practical validation path is manual:
+### Bandwidth Test
 
-1. Build `server` and `client`.
-2. Start `server -room new`.
-3. Start `client` with the emitted room URL and key.
-4. Use `curl` through `127.0.0.1:1080`.
-5. Check that the server logs show `connecting` for the requested destination.
-
-Useful targets for smoke tests:
-
-- `example.com:80`
-- `example.com:443`
-- any internal TCP service reachable from the server host
-
-## Bandwidth Testing
-
-The cleanest throughput test is to serve a large file from the server host itself and fetch it through the SOCKS tunnel.
-
-On the server:
+On the remote server:
 
 ```bash
 mkdir -p /root/bench
@@ -366,63 +161,255 @@ dd if=/dev/zero of=/root/bench/100m.bin bs=1M count=100 status=none
 python3 -m http.server 8088 --directory /root/bench
 ```
 
-On the client machine, once `./client` is already running:
-
-```bash
-curl --socks5-hostname 127.0.0.1:1080 -o /dev/null http://SERVER_IP:8088/100m.bin
-```
-
-For a short fixed-window sample:
-
-```bash
-curl --max-time 15 --socks5-hostname 127.0.0.1:1080 -o /dev/null -w "speed=%{speed_download} bytes/s time=%{time_total}s code=%{http_code}\n" http://SERVER_IP:8088/100m.bin
-```
-
-Windows PowerShell:
+On the client machine:
 
 ```powershell
 curl.exe --max-time 15 --socks5-hostname 127.0.0.1:1080 -o NUL -w "speed=%{speed_download} bytes/s time=%{time_total}s code=%{http_code}`n" http://SERVER_IP:8088/100m.bin
 ```
 
-To see aggregate throughput, run several transfers in parallel and sum the reported `speed_download` values.
+To estimate megabits per second:
 
-## Troubleshooting
+```text
+Mbit/s = bytes_per_second * 8 / 1,000,000
+```
 
-### Client says the room URL must include password
+Current practical results from this codebase:
 
-Use the full invite link with `?psw=...`, not only the room ID.
+- single stream: roughly `33-43 Mbit/s`
+- aggregate throughput with `-peers 4` and several parallel downloads: roughly `85-90 Mbit/s`
 
-### Tunnel connects but traffic does not pass
+This is usually enough for normal browsing and `1080p`. `1440p` may work, but stable `4K` should not be assumed.
 
-Check:
+### Troubleshooting
 
-- the key matches on both sides
-- the server can resolve and reach the target host
-- the local app is actually using SOCKS5, not HTTP proxy mode
-- TURN/ICE traffic is not blocked by the network
+Room URL rejected:
 
-### Frequent reconnects or dropped streams
+- use the full invite link, including `?psw=...`
 
-Current reconnect behavior is coarse-grained: the transport reconnects, but active mux streams are reset. Long-lived connections can therefore be interrupted by transport instability.
+Tunnel connects but traffic does not pass:
 
-### Server cannot resolve domains
+- verify the key matches on both sides
+- verify the client is using SOCKS5, not HTTP proxy mode
+- verify the server can resolve and reach the target host
 
-Try overriding DNS:
+Frequent reconnects:
+
+- current reconnect behavior is coarse; active streams are reset after transport loss
+
+Remote DNS issues:
 
 ```bash
 ./server -room new -dns 8.8.8.8:53
 ```
 
-### Server must egress through another proxy
-
-Use:
+Remote egress through another SOCKS5 proxy:
 
 ```bash
 ./server -room new -socks 127.0.0.1:9050
 ```
 
-## Dependencies
+## Russian
 
-- `github.com/pion/webrtc/v4`
-- `github.com/gorilla/websocket`
-- `github.com/google/uuid`
+### Описание
+
+`olcrtc` строит TCP-туннель поверх комнат Salute Jazz и WebRTC DataChannel.
+На практике клиент поднимает локальный SOCKS5-прокси и пересылает TCP-трафик через комнату Salute Jazz на удаленный серверный процесс.
+
+Схема трафика:
+
+```text
+[приложение/браузер]
+    -> SOCKS5
+    -> [olcrtc client]
+    -> WebRTC DataChannel через Salute Jazz
+    -> [olcrtc server]
+    -> целевой TCP-сервис
+```
+
+Полезная нагрузка туннеля шифруется end-to-end через AES-256-GCM еще до попадания в DataChannel.
+
+### Что Есть В Проекте
+
+- `cmd/client`: локальная точка входа SOCKS5, превращающая `CONNECT` в потоки туннеля
+- `cmd/server`: удаленная сторона, входящая в ту же комнату и открывающая исходящие TCP-подключения
+- `internal/transport/jazz`: API Salute Jazz, сигналинг, WebRTC и транспорт DataChannel
+- `internal/mux`: мультиплексирование логических потоков с flow control
+- `internal/crypto`: шифрование кадров
+- `internal/tunnel`: связка между сокетами и mux-потоками
+- `internal/socks`: минимальный SOCKS5-сервер
+
+### Что Сейчас Умеет
+
+- TCP-туннель поверх комнат Salute Jazz
+- локальный SOCKS5-прокси на клиенте
+- AES-256-GCM для кадров mux
+- несколько транспортных peer-ов через `-peers N`
+- привязка каждого stream к одному peer-у для сохранения порядка TCP-байтов
+- credit-based flow control в mux
+- кастомный DNS-резолвер на удаленной стороне
+- опциональный upstream SOCKS5-прокси для исходящих подключений сервера
+
+### Ограничения
+
+- поддерживается только SOCKS5 `CONNECT`
+- нет SOCKS-аутентификации
+- нет UDP associate
+- нет bind
+- reconnect транспорта сбрасывает активные потоки вместо resume
+- отдельного контроля доступа нет: фактически защита держится на room URL и общем ключе
+- максимальная пропускная способность лучше раскрывается на нескольких параллельных TCP-соединениях, а не на одном потоке
+
+### Требования
+
+- Go `1.25` или новее
+- сетевой доступ к сигналингу Salute Jazz и к ICE/TURN-инфраструктуре
+- удаленная машина, с которой можно достучаться до целевых TCP-хостов
+
+### Сборка
+
+Linux или macOS:
+
+```bash
+go build -o server ./cmd/server
+go build -o client ./cmd/client
+```
+
+Windows PowerShell:
+
+```powershell
+go build -o server.exe .\cmd\server
+go build -o client.exe .\cmd\client
+```
+
+### Запуск
+
+#### Вариант 1: Сервер Сам Создает Комнату
+
+Сначала запускается сервер:
+
+```bash
+./server -room new -peers 4 -v
+```
+
+Сервер создаст комнату, а если `-key` не задан, сам сгенерирует ключ и выведет его вместе с room URL.
+
+Потом запускается клиент с тем же room URL и ключом:
+
+```powershell
+.\client.exe -room "https://salutejazz.ru/ROOM?psw=..." -key YOUR_KEY -peers 4 -v
+```
+
+По умолчанию локальный SOCKS5 слушает `127.0.0.1:1080`.
+
+#### Вариант 2: Обе Стороны Входят В Уже Существующую Комнату
+
+```bash
+./server -room "https://salutejazz.ru/ROOM?psw=..." -key YOUR_KEY -peers 4
+./client -room "https://salutejazz.ru/ROOM?psw=..." -key YOUR_KEY -peers 4
+```
+
+### Флаги
+
+Сервер:
+
+- `-room`: полный room URL или `new`
+- `-key`: 64-символьный hex-ключ; на сервере может быть сгенерирован автоматически
+- `-duo`: быстрый режим на два transport peer-а
+- `-peers`: количество transport peer-ов; перекрывает `-duo`
+- `-dns`: DNS-резолвер для удаленных исходящих подключений, по умолчанию `1.1.1.1:53`
+- `-socks`: upstream SOCKS5-прокси, через который сервер делает исходящие подключения
+- `-v`: подробные логи
+
+Клиент:
+
+- `-room`: полный room URL
+- `-key`: тот же 64-символьный hex-ключ, что и у сервера
+- `-listen`: адрес локального SOCKS5, по умолчанию `127.0.0.1:1080`
+- `-duo`: быстрый режим на два transport peer-а
+- `-peers`: количество transport peer-ов; перекрывает `-duo`
+- `-v`: подробные логи
+
+### Тесты
+
+Все unit-тесты:
+
+```bash
+go test ./...
+```
+
+По пакетам:
+
+```bash
+go test ./internal/crypto -v
+go test ./internal/mux -v
+go test ./internal/transport/jazz -v
+```
+
+### Ручная End-To-End Проверка
+
+1. Запусти `server`.
+2. Запусти `client` с тем же room URL и ключом.
+3. Проверь внешний IP через локальный SOCKS5:
+
+```powershell
+curl.exe --socks5-hostname 127.0.0.1:1080 https://ifconfig.me/ip
+```
+
+Если туннель работает, вернется IP удаленного сервера.
+
+### Тест Пропускной Способности
+
+На удаленном сервере:
+
+```bash
+mkdir -p /root/bench
+dd if=/dev/zero of=/root/bench/100m.bin bs=1M count=100 status=none
+python3 -m http.server 8088 --directory /root/bench
+```
+
+На клиентской машине:
+
+```powershell
+curl.exe --max-time 15 --socks5-hostname 127.0.0.1:1080 -o NUL -w "speed=%{speed_download} bytes/s time=%{time_total}s code=%{http_code}`n" http://SERVER_IP:8088/100m.bin
+```
+
+Перевод в мегабиты в секунду:
+
+```text
+Mbit/s = bytes_per_second * 8 / 1,000,000
+```
+
+Практические результаты на текущем коде:
+
+- один поток: примерно `33-43 Mbit/s`
+- aggregate throughput на `-peers 4` и нескольких параллельных загрузках: примерно `85-90 Mbit/s`
+
+Обычно этого хватает для обычного веба и `1080p`. `1440p` может работать, но стабильный `4K` на текущей архитектуре закладывать не стоит.
+
+### Диагностика
+
+Не принимается room URL:
+
+- нужен полный invite link, включая `?psw=...`
+
+Туннель поднялся, но трафик не идет:
+
+- проверь, что ключ на обеих сторонах одинаковый
+- проверь, что приложение использует именно SOCKS5, а не HTTP proxy
+- проверь, что сервер может резолвить и открывать целевой хост
+
+Частые reconnect:
+
+- текущая логика reconnect грубая; активные потоки после потери транспорта сбрасываются
+
+Проблемы с DNS на сервере:
+
+```bash
+./server -room new -dns 8.8.8.8:53
+```
+
+Нужно выпускать трафик сервера через другой SOCKS5:
+
+```bash
+./server -room new -socks 127.0.0.1:9050
+```
