@@ -11,17 +11,17 @@ import (
 	"os/signal"
 	"syscall"
 
-	"github.com/Kavun-Sama/salute-jazz-rtc-tunnel/internal/crypto"
-	"github.com/Kavun-Sama/salute-jazz-rtc-tunnel/internal/transport"
-	"github.com/Kavun-Sama/salute-jazz-rtc-tunnel/internal/transport/jazz"
-	"github.com/Kavun-Sama/salute-jazz-rtc-tunnel/internal/tunnel"
+	"github.com/Kavun-Sama/jazztun/internal/crypto"
+	"github.com/Kavun-Sama/jazztun/internal/transport/jazz"
+	"github.com/Kavun-Sama/jazztun/internal/tunnel"
 )
 
 func main() {
-	room := flag.String("room", "", "Jazz room URL or 'new' to create a new one")
+	room := flag.String("room", "", "Jazz room URL list or 'new' to create room(s)")
 	key := flag.String("key", "", "hex 32 bytes encryption key (if empty, generate and print)")
 	duo := flag.Bool("duo", false, "use 2 transport peers in parallel")
 	peersFlag := flag.Int("peers", 0, "number of transport peers to open (overrides -duo)")
+	roomsFlag := flag.Int("rooms", 0, "number of rooms to create with -room=new, or expected room count for a room list (0 = infer/default 1)")
 	dns := flag.String("dns", "1.1.1.1:53", "DNS server")
 	socksProxy := flag.String("socks", "", "upstream SOCKS5 proxy addr:port")
 	verbose := flag.Bool("v", false, "verbose logging")
@@ -51,23 +51,12 @@ func main() {
 	// Setup API client
 	api := jazz.NewAPIClient(logger)
 
-	// Resolve room
-	roomID, password, err := resolveRoom(api, *room, logger)
+	roomSpecs, err := resolveRooms(api, *room, *roomsFlag, logger)
 	if err != nil {
-		logger.Error("room error", "error", err)
+		logger.Error("room config error", "error", err)
 		os.Exit(1)
 	}
 
-	// Preconnect
-	preResp, err := api.Preconnect(roomID, password)
-	if err != nil {
-		logger.Warn("preconnect failed, using default connector", "error", err, "connectorUrl", jazz.DefaultConnectorURL)
-		preResp = &jazz.PreconnectResponse{
-			ConnectorURL: jazz.DefaultConnectorURL,
-		}
-	}
-
-	// Create transport peers
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -77,30 +66,29 @@ func main() {
 		os.Exit(1)
 	}
 
-	peers := make([]transport.Transport, 0, peerCount)
-	for i := 0; i < peerCount; i++ {
-		peer := jazz.NewPeer(jazz.PeerConfig{
-			RoomID:                roomID,
-			Password:              password,
-			ConnectorURL:          preResp.ConnectorURL,
-			APIClient:             api,
-			ParticipantName:       peerName("server", i),
-			TargetParticipantName: peerName("client", i),
-			Logger:                logger,
-		})
+	manager, err := jazz.NewManager(jazz.ManagerConfig{
+		APIClient:    api,
+		Rooms:        roomSpecs,
+		PeersPerRoom: peerCount,
+		Role:         "server",
+		Logger:       logger,
+	})
+	if err != nil {
+		logger.Error("manager config error", "error", err)
+		os.Exit(1)
+	}
 
-		if err := peer.Connect(ctx); err != nil {
-			logger.Error("peer connect failed", "error", err, "peer", i)
-			os.Exit(1)
-		}
-
-		go peer.WatchConnection(ctx)
-		peers = append(peers, peer)
+	peers, err := manager.ConnectAll(ctx)
+	if err != nil {
+		logger.Error("peer connect failed", "error", err)
+		os.Exit(1)
 	}
 
 	logger.Info("all peers connected",
-		"roomId", roomID,
-		"peers", peerCount,
+		"rooms", len(roomSpecs),
+		"roomArg", jazz.JoinRoomURLs(roomSpecs),
+		"peersPerRoom", peerCount,
+		"totalPeers", len(peers),
 		"key", hex.EncodeToString(keyBytes),
 	)
 
@@ -142,10 +130,6 @@ func resolvePeerCount(peers int, duo bool) (int, error) {
 	return 1, nil
 }
 
-func peerName(role string, index int) string {
-	return fmt.Sprintf("olcrtc-%s-%d", role, index+1)
-}
-
 func resolveKey(keyHex string) ([]byte, error) {
 	if keyHex == "" {
 		key := make([]byte, 32)
@@ -166,28 +150,37 @@ func resolveKey(keyHex string) ([]byte, error) {
 	return key, nil
 }
 
-func resolveRoom(api *jazz.APIClient, room string, logger *slog.Logger) (roomID, password string, err error) {
-	if room == "" {
-		return "", "", fmt.Errorf("room is required (-room flag)")
+func resolveRooms(api *jazz.APIClient, roomArg string, roomCount int, logger *slog.Logger) ([]jazz.RoomSpec, error) {
+	if roomArg == "" {
+		return nil, fmt.Errorf("room is required (-room flag)")
 	}
 
-	if room == "new" {
-		resp, err := api.CreateRoom()
-		if err != nil {
-			return "", "", fmt.Errorf("create room: %w", err)
+	if roomArg == "new" {
+		if roomCount <= 0 {
+			roomCount = 1
 		}
-		logger.Info("created room", "url", resp.URL, "roomId", resp.RoomID, "password", resp.Password)
-		return resp.RoomID, resp.Password, nil
+		rooms, err := api.CreateRooms(roomCount)
+		if err != nil {
+			return nil, fmt.Errorf("create rooms: %w", err)
+		}
+		for i, room := range rooms {
+			logger.Info("created room",
+				"index", i+1,
+				"roomId", room.RoomID,
+				"url", room.URL,
+			)
+		}
+		logger.Info("created room set", "rooms", len(rooms), "roomArg", jazz.JoinRoomURLs(rooms))
+		return rooms, nil
 	}
 
-	roomID, password, err = jazz.ParseRoomURL(room)
+	rooms, err := jazz.ParseRoomList(roomArg)
 	if err != nil {
-		return "", "", fmt.Errorf("parse room URL: %w", err)
+		return nil, err
+	}
+	if roomCount > 0 && len(rooms) != roomCount {
+		return nil, fmt.Errorf("expected %d rooms, got %d", roomCount, len(rooms))
 	}
 
-	if password == "" {
-		return "", "", fmt.Errorf("room URL must include password (psw parameter)")
-	}
-
-	return roomID, password, nil
+	return rooms, nil
 }

@@ -1,4 +1,4 @@
-module github.com/Kavun-Sama/salute-jazz-rtc-tunnel
+module github.com/Kavun-Sama/jazztun
 
 go 1.25.0
 

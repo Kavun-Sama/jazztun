@@ -4,8 +4,8 @@ import (
 	"fmt"
 	"time"
 
-	icrypto "github.com/Kavun-Sama/salute-jazz-rtc-tunnel/internal/crypto"
-	"github.com/Kavun-Sama/salute-jazz-rtc-tunnel/internal/transport"
+	icrypto "github.com/Kavun-Sama/jazztun/internal/crypto"
+	"github.com/Kavun-Sama/jazztun/internal/transport"
 )
 
 const cmdConnect = "connect"

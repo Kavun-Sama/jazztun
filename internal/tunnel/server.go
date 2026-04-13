@@ -11,9 +11,9 @@ import (
 	"sync"
 	"time"
 
-	"github.com/Kavun-Sama/salute-jazz-rtc-tunnel/internal/crypto"
-	"github.com/Kavun-Sama/salute-jazz-rtc-tunnel/internal/mux"
-	"github.com/Kavun-Sama/salute-jazz-rtc-tunnel/internal/transport"
+	"github.com/Kavun-Sama/jazztun/internal/crypto"
+	"github.com/Kavun-Sama/jazztun/internal/mux"
+	"github.com/Kavun-Sama/jazztun/internal/transport"
 )
 
 // ConnectRequest is the first frame sent by the client on a new stream.

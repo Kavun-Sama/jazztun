@@ -378,7 +378,7 @@ func (p *Peer) closeWS() {
 func (p *Peer) join() error {
 	participantName := p.participantName
 	if participantName == "" {
-		participantName = "olcrtc"
+		participantName = "jazztun"
 	}
 
 	payload := map[string]any{
@@ -1048,7 +1048,7 @@ func (p *Peer) startPublisher(ctx context.Context) error {
 	track, err := webrtc.NewTrackLocalStaticSample(
 		webrtc.RTPCodecCapability{MimeType: webrtc.MimeTypeOpus, ClockRate: 48000, Channels: 2},
 		trackCID,
-		"olcrtc",
+		"jazztun",
 	)
 	if err != nil {
 		return fmt.Errorf("create publisher track: %w", err)

@@ -10,10 +10,10 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/Kavun-Sama/salute-jazz-rtc-tunnel/internal/crypto"
-	"github.com/Kavun-Sama/salute-jazz-rtc-tunnel/internal/mux"
-	"github.com/Kavun-Sama/salute-jazz-rtc-tunnel/internal/socks"
-	"github.com/Kavun-Sama/salute-jazz-rtc-tunnel/internal/transport"
+	"github.com/Kavun-Sama/jazztun/internal/crypto"
+	"github.com/Kavun-Sama/jazztun/internal/mux"
+	"github.com/Kavun-Sama/jazztun/internal/socks"
+	"github.com/Kavun-Sama/jazztun/internal/transport"
 )
 
 // Client runs a local SOCKS5 proxy and tunnels traffic through transport peers.

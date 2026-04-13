@@ -12,18 +12,18 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/Kavun-Sama/salute-jazz-rtc-tunnel/internal/crypto"
-	"github.com/Kavun-Sama/salute-jazz-rtc-tunnel/internal/transport"
-	"github.com/Kavun-Sama/salute-jazz-rtc-tunnel/internal/transport/jazz"
-	"github.com/Kavun-Sama/salute-jazz-rtc-tunnel/internal/tunnel"
+	"github.com/Kavun-Sama/jazztun/internal/crypto"
+	"github.com/Kavun-Sama/jazztun/internal/transport/jazz"
+	"github.com/Kavun-Sama/jazztun/internal/tunnel"
 )
 
 func main() {
-	room := flag.String("room", "", "Jazz room URL")
+	room := flag.String("room", "", "Jazz room URL or comma-separated room URL list")
 	key := flag.String("key", "", "hex 32 bytes encryption key")
 	listen := flag.String("listen", "127.0.0.1:1080", "local SOCKS5 address")
 	duo := flag.Bool("duo", false, "use 2 transport peers in parallel")
 	peersFlag := flag.Int("peers", 0, "number of transport peers to open (overrides -duo)")
+	roomsFlag := flag.Int("rooms", 0, "expected number of rooms in -room list (0 = infer from list)")
 	verbose := flag.Bool("v", false, "verbose logging")
 	flag.Parse()
 
@@ -61,29 +61,14 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Parse room URL
-	roomID, password, err := jazz.ParseRoomURL(*room)
+	roomSpecs, err := resolveRooms(*room, *roomsFlag)
 	if err != nil {
-		logger.Error("parse room URL", "error", err)
-		os.Exit(1)
-	}
-	if password == "" {
-		logger.Error("room URL must include password (psw parameter)")
+		logger.Error("room config error", "error", err)
 		os.Exit(1)
 	}
 
-	// Setup API client and preconnect
 	api := jazz.NewAPIClient(logger)
 
-	preResp, err := api.Preconnect(roomID, password)
-	if err != nil {
-		logger.Warn("preconnect failed, using default connector", "error", err, "connectorUrl", jazz.DefaultConnectorURL)
-		preResp = &jazz.PreconnectResponse{
-			ConnectorURL: jazz.DefaultConnectorURL,
-		}
-	}
-
-	// Create transport peers
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -93,28 +78,29 @@ func main() {
 		os.Exit(1)
 	}
 
-	peers := make([]transport.Transport, 0, peerCount)
-	for i := 0; i < peerCount; i++ {
-		peer := jazz.NewPeer(jazz.PeerConfig{
-			RoomID:                roomID,
-			Password:              password,
-			ConnectorURL:          preResp.ConnectorURL,
-			APIClient:             api,
-			ParticipantName:       peerName("client", i),
-			TargetParticipantName: peerName("server", i),
-			Logger:                logger,
-		})
-
-		if err := peer.Connect(ctx); err != nil {
-			logger.Error("peer connect failed", "error", err, "peer", i)
-			os.Exit(1)
-		}
-
-		go peer.WatchConnection(ctx)
-		peers = append(peers, peer)
+	manager, err := jazz.NewManager(jazz.ManagerConfig{
+		APIClient:    api,
+		Rooms:        roomSpecs,
+		PeersPerRoom: peerCount,
+		Role:         "client",
+		Logger:       logger,
+	})
+	if err != nil {
+		logger.Error("manager config error", "error", err)
+		os.Exit(1)
 	}
 
-	logger.Info("all peers connected", "roomId", roomID, "peers", peerCount)
+	peers, err := manager.ConnectAll(ctx)
+	if err != nil {
+		logger.Error("peer connect failed", "error", err)
+		os.Exit(1)
+	}
+
+	logger.Info("all peers connected",
+		"rooms", len(roomSpecs),
+		"peersPerRoom", peerCount,
+		"totalPeers", len(peers),
+	)
 
 	// Generate client ID
 	clientID := generateClientID()
@@ -168,6 +154,19 @@ func resolvePeerCount(peers int, duo bool) (int, error) {
 	return 1, nil
 }
 
-func peerName(role string, index int) string {
-	return fmt.Sprintf("olcrtc-%s-%d", role, index+1)
+func resolveRooms(roomArg string, expectedCount int) ([]jazz.RoomSpec, error) {
+	if roomArg == "" {
+		return nil, fmt.Errorf("room is required (-room flag)")
+	}
+
+	rooms, err := jazz.ParseRoomList(roomArg)
+	if err != nil {
+		return nil, err
+	}
+
+	if expectedCount > 0 && len(rooms) != expectedCount {
+		return nil, fmt.Errorf("expected %d rooms, got %d", expectedCount, len(rooms))
+	}
+
+	return rooms, nil
 }
