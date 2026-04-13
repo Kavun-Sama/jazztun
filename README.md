@@ -54,8 +54,8 @@ To reach resources blocked in Russia, the remote server must be outside Russia. 
 
 - No UDP associate
 - No bind support
-- Transport reconnect still resets active streams instead of resuming them
 - Access control is effectively the room URL plus the shared key
+- Full peer teardown and rebuild through `WatchConnection` is covered by tests; the live reconnect run recovered on the same WebRTC session
 
 ### Download
 
@@ -197,7 +197,7 @@ curl.exe --max-time 15 --socks5-hostname 127.0.0.1:1080 -o NUL -w "speed=%{speed
 Observed throughput on the current codebase:
 
 - single stream: roughly `33-43 Mbit/s`
-- aggregate throughput with `-peers 4` and several parallel downloads: roughly `85-90 Mbit/s`
+- aggregate throughput with `-peers 6` and eight parallel downloads: about `110 Mbit/s`
 
 ### Troubleshooting
 
@@ -213,7 +213,8 @@ Tunnel connects but traffic does not pass:
 
 Frequent reconnects:
 
-- current reconnect behavior is coarse; active streams are reset after transport loss
+- active streams resume across the tested blackout/reconnect path
+- a full peer teardown and rebuild through `WatchConnection` is covered by tests; the live reconnect run recovered on the same WebRTC session
 
 Server-side DNS issues:
 
@@ -273,8 +274,8 @@ Server egress through another SOCKS5 proxy:
 
 - нет UDP associate
 - нет bind
-- reconnect транспорта пока сбрасывает активные потоки вместо resume
 - контроль доступа фактически держится на room URL и общем ключе
+- полный teardown и rebuild peer-а через `WatchConnection` покрыт тестами; в живом reconnect-тесте восстановление произошло на той же WebRTC-сессии
 
 ### Download
 
@@ -415,7 +416,7 @@ curl.exe --max-time 15 --socks5-hostname 127.0.0.1:1080 -o NUL -w "speed=%{speed
 Наблюдаемые значения на текущем коде:
 
 - один поток: примерно `33-43 Mbit/s`
-- aggregate throughput на `-peers 4` и нескольких параллельных загрузках: примерно `85-90 Mbit/s`
+- aggregate throughput на `-peers 6` и восьми параллельных загрузках: около `110 Mbit/s`
 
 ### Диагностика
 
@@ -431,7 +432,8 @@ curl.exe --max-time 15 --socks5-hostname 127.0.0.1:1080 -o NUL -w "speed=%{speed
 
 Частые reconnect:
 
-- текущая логика reconnect грубая; активные потоки после потери транспорта сбрасываются
+- активные потоки переживают протестированный blackout/reconnect сценарий
+- полный teardown и rebuild peer-а через `WatchConnection` покрыт тестами; в живом reconnect-тесте восстановление произошло на той же WebRTC-сессии
 
 Проблемы с DNS на сервере:
 
