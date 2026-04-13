@@ -18,12 +18,11 @@ import (
 )
 
 func main() {
-	room := flag.String("room", "", "Jazz room URL or comma-separated room URL list")
+	room := flag.String("room", "", "Jazz room URL")
 	key := flag.String("key", "", "hex 32 bytes encryption key")
 	listen := flag.String("listen", "127.0.0.1:1080", "local SOCKS5 address")
 	duo := flag.Bool("duo", false, "use 2 transport peers in parallel")
 	peersFlag := flag.Int("peers", 0, "number of transport peers to open (overrides -duo)")
-	roomsFlag := flag.Int("rooms", 0, "expected number of rooms in -room list (0 = infer from list)")
 	verbose := flag.Bool("v", false, "verbose logging")
 	flag.Parse()
 
@@ -61,7 +60,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	roomSpecs, err := resolveRooms(*room, *roomsFlag)
+	roomSpec, err := resolveRoom(*room)
 	if err != nil {
 		logger.Error("room config error", "error", err)
 		os.Exit(1)
@@ -80,7 +79,7 @@ func main() {
 
 	manager, err := jazz.NewManager(jazz.ManagerConfig{
 		APIClient:    api,
-		Rooms:        roomSpecs,
+		Room:         roomSpec,
 		PeersPerRoom: peerCount,
 		Role:         "client",
 		Logger:       logger,
@@ -97,7 +96,7 @@ func main() {
 	}
 
 	logger.Info("all peers connected",
-		"rooms", len(roomSpecs),
+		"roomId", roomSpec.RoomID,
 		"peersPerRoom", peerCount,
 		"totalPeers", len(peers),
 	)
@@ -117,6 +116,13 @@ func main() {
 	logger.Info("starting SOCKS5 proxy",
 		"listen", *listen,
 		"clientID", fmt.Sprintf("%08x", clientID),
+	)
+	logger.Info("jazztun ready",
+		"listen", *listen,
+		"roomId", roomSpec.RoomID,
+		"peersPerRoom", peerCount,
+		"totalPeers", len(peers),
+		"keyPrefix", hex.EncodeToString(keyBytes[:4]),
 	)
 
 	// Handle signals
@@ -154,19 +160,22 @@ func resolvePeerCount(peers int, duo bool) (int, error) {
 	return 1, nil
 }
 
-func resolveRooms(roomArg string, expectedCount int) ([]jazz.RoomSpec, error) {
+func resolveRoom(roomArg string) (jazz.RoomSpec, error) {
 	if roomArg == "" {
-		return nil, fmt.Errorf("room is required (-room flag)")
+		return jazz.RoomSpec{}, fmt.Errorf("room is required (-room flag)")
 	}
 
-	rooms, err := jazz.ParseRoomList(roomArg)
+	roomID, password, err := jazz.ParseRoomURL(roomArg)
 	if err != nil {
-		return nil, err
+		return jazz.RoomSpec{}, fmt.Errorf("parse room URL: %w", err)
+	}
+	if password == "" {
+		return jazz.RoomSpec{}, fmt.Errorf("room URL must include password (psw parameter)")
 	}
 
-	if expectedCount > 0 && len(rooms) != expectedCount {
-		return nil, fmt.Errorf("expected %d rooms, got %d", expectedCount, len(rooms))
-	}
-
-	return rooms, nil
+	return jazz.RoomSpec{
+		RoomID:   roomID,
+		Password: password,
+		URL:      roomArg,
+	}, nil
 }

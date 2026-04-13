@@ -6,12 +6,13 @@ import (
 	"log/slog"
 
 	"github.com/Kavun-Sama/jazztun/internal/transport"
+	"golang.org/x/sync/errgroup"
 )
 
-// Manager provisions and connects transport peers across one or more rooms.
+// Manager provisions and connects transport peers for one room.
 type Manager struct {
 	apiClient    *APIClient
-	rooms        []RoomSpec
+	room         RoomSpec
 	peersPerRoom int
 	role         string
 	log          *slog.Logger
@@ -20,7 +21,7 @@ type Manager struct {
 // ManagerConfig describes how to build a room/peer topology.
 type ManagerConfig struct {
 	APIClient    *APIClient
-	Rooms        []RoomSpec
+	Room         RoomSpec
 	PeersPerRoom int
 	Role         string
 	Logger       *slog.Logger
@@ -31,8 +32,8 @@ func NewManager(cfg ManagerConfig) (*Manager, error) {
 	if cfg.APIClient == nil {
 		return nil, fmt.Errorf("api client is required")
 	}
-	if len(cfg.Rooms) == 0 {
-		return nil, fmt.Errorf("at least one room is required")
+	if cfg.Room.RoomID == "" {
+		return nil, fmt.Errorf("room is required")
 	}
 	if cfg.PeersPerRoom <= 0 {
 		return nil, fmt.Errorf("peers per room must be > 0")
@@ -46,7 +47,7 @@ func NewManager(cfg ManagerConfig) (*Manager, error) {
 
 	return &Manager{
 		apiClient:    cfg.APIClient,
-		rooms:        cfg.Rooms,
+		room:         cfg.Room,
 		peersPerRoom: cfg.PeersPerRoom,
 		role:         cfg.Role,
 		log:          cfg.Logger.With(slog.String("component", "jazz/manager")),
@@ -55,56 +56,66 @@ func NewManager(cfg ManagerConfig) (*Manager, error) {
 
 // ConnectAll creates, connects, and starts reconnection loops for all peers.
 func (m *Manager) ConnectAll(ctx context.Context) ([]transport.Transport, error) {
-	peers := make([]transport.Transport, 0, len(m.rooms)*m.peersPerRoom)
-
-	for roomIndex, room := range m.rooms {
-		connectorURL := room.ConnectorURL
-		if connectorURL == "" {
-			preResp, err := m.apiClient.Preconnect(room.RoomID, room.Password)
-			if err != nil {
-				m.log.Warn("preconnect failed, using default connector",
-					"error", err,
-					"roomId", room.RoomID,
-					"connectorUrl", DefaultConnectorURL,
-				)
-				connectorURL = DefaultConnectorURL
-			} else {
-				connectorURL = preResp.ConnectorURL
-			}
+	connectorURL := m.room.ConnectorURL
+	if connectorURL == "" {
+		preResp, err := m.apiClient.Preconnect(m.room.RoomID, m.room.Password)
+		if err != nil {
+			m.log.Warn("preconnect failed, using default connector",
+				"error", err,
+				"roomId", m.room.RoomID,
+				"connectorUrl", DefaultConnectorURL,
+			)
+			connectorURL = DefaultConnectorURL
+		} else {
+			connectorURL = preResp.ConnectorURL
 		}
+	}
 
-		for peerIndex := 0; peerIndex < m.peersPerRoom; peerIndex++ {
+	peers := make([]transport.Transport, m.peersPerRoom)
+	group, groupCtx := errgroup.WithContext(ctx)
+
+	for peerIndex := 0; peerIndex < m.peersPerRoom; peerIndex++ {
+		peerIndex := peerIndex
+
+		group.Go(func() error {
 			peer := NewPeer(PeerConfig{
-				RoomID:                room.RoomID,
-				Password:              room.Password,
+				RoomID:                m.room.RoomID,
+				Password:              m.room.Password,
 				ConnectorURL:          connectorURL,
 				APIClient:             m.apiClient,
-				ParticipantName:       peerName(m.role, roomIndex, peerIndex),
-				TargetParticipantName: peerName(oppositeRole(m.role), roomIndex, peerIndex),
+				ParticipantName:       peerName(m.role, peerIndex),
+				TargetParticipantName: peerName(oppositeRole(m.role), peerIndex),
 				Logger: m.log.With(
-					slog.Int("roomIndex", roomIndex+1),
 					slog.Int("peerIndex", peerIndex+1),
-					slog.String("roomId", room.RoomID),
+					slog.String("roomId", m.room.RoomID),
 				),
 			})
 
-			if err := peer.Connect(ctx); err != nil {
-				for _, connected := range peers {
-					connected.Close()
-				}
-				return nil, fmt.Errorf("connect room %d peer %d: %w", roomIndex+1, peerIndex+1, err)
+			if err := peer.Connect(groupCtx); err != nil {
+				peer.Close()
+				return fmt.Errorf("connect peer %d: %w", peerIndex+1, err)
 			}
 
-			go peer.WatchConnection(ctx)
-			peers = append(peers, peer)
+			go peer.WatchConnection(groupCtx)
+			peers[peerIndex] = peer
+			return nil
+		})
+	}
+
+	if err := group.Wait(); err != nil {
+		for _, connected := range peers {
+			if connected != nil {
+				connected.Close()
+			}
 		}
+		return nil, err
 	}
 
 	return peers, nil
 }
 
-func peerName(role string, roomIndex, peerIndex int) string {
-	return fmt.Sprintf("jazztun-r%d-%s-%d", roomIndex+1, role, peerIndex+1)
+func peerName(role string, peerIndex int) string {
+	return fmt.Sprintf("jazztun-%s-%d", role, peerIndex+1)
 }
 
 func oppositeRole(role string) string {

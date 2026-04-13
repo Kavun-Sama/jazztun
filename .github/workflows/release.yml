@@ -42,7 +42,7 @@ jobs:
 
           (
             cd dist
-            sha256sum * > checksums.txt
+            sha256sum jazztun-* > checksums.txt
           )
 
       - name: Publish release

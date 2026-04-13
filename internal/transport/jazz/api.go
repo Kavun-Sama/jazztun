@@ -115,27 +115,6 @@ func (c *APIClient) CreateRoom() (*CreateRoomResponse, error) {
 	return &result, nil
 }
 
-// CreateRooms creates count independent rooms for multi-room transport sharding.
-func (c *APIClient) CreateRooms(count int) ([]RoomSpec, error) {
-	if count <= 0 {
-		return nil, fmt.Errorf("room count must be > 0")
-	}
-
-	rooms := make([]RoomSpec, 0, count)
-	for i := 0; i < count; i++ {
-		resp, err := c.CreateRoom()
-		if err != nil {
-			return nil, fmt.Errorf("create room %d/%d: %w", i+1, count, err)
-		}
-		rooms = append(rooms, RoomSpec{
-			RoomID:   resp.RoomID,
-			Password: resp.Password,
-			URL:      resp.URL,
-		})
-	}
-	return rooms, nil
-}
-
 // Preconnect gets the WebSocket connector URL for a room.
 func (c *APIClient) Preconnect(roomID, password string) (*PreconnectResponse, error) {
 	body := map[string]any{
@@ -275,55 +254,6 @@ func BuildRoomURL(roomID, password string) (string, error) {
 		return "", err
 	}
 	return fmt.Sprintf("%s/%s?psw=%s", origin, roomID, psw), nil
-}
-
-// ParseRoomList parses one or more room URLs separated by commas.
-func ParseRoomList(raw string) ([]RoomSpec, error) {
-	parts := strings.Split(raw, ",")
-	rooms := make([]RoomSpec, 0, len(parts))
-
-	for _, part := range parts {
-		part = strings.TrimSpace(part)
-		if part == "" {
-			continue
-		}
-
-		roomID, password, err := ParseRoomURL(part)
-		if err != nil {
-			return nil, fmt.Errorf("parse room %q: %w", part, err)
-		}
-		if password == "" {
-			return nil, fmt.Errorf("room %q must include password (psw parameter)", part)
-		}
-
-		rooms = append(rooms, RoomSpec{
-			RoomID:   roomID,
-			Password: password,
-			URL:      part,
-		})
-	}
-
-	if len(rooms) == 0 {
-		return nil, fmt.Errorf("no rooms provided")
-	}
-
-	return rooms, nil
-}
-
-// JoinRoomURLs returns a copy-paste friendly room list for the CLI.
-func JoinRoomURLs(rooms []RoomSpec) string {
-	urls := make([]string, 0, len(rooms))
-	for _, room := range rooms {
-		if room.URL != "" {
-			urls = append(urls, room.URL)
-			continue
-		}
-		url, err := BuildRoomURL(room.RoomID, room.Password)
-		if err == nil {
-			urls = append(urls, url)
-		}
-	}
-	return strings.Join(urls, ",")
 }
 
 // ClientID returns the session client ID.

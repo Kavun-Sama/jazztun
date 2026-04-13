@@ -17,11 +17,10 @@ import (
 )
 
 func main() {
-	room := flag.String("room", "", "Jazz room URL list or 'new' to create room(s)")
+	room := flag.String("room", "", "Jazz room URL or 'new' to create a room")
 	key := flag.String("key", "", "hex 32 bytes encryption key (if empty, generate and print)")
 	duo := flag.Bool("duo", false, "use 2 transport peers in parallel")
 	peersFlag := flag.Int("peers", 0, "number of transport peers to open (overrides -duo)")
-	roomsFlag := flag.Int("rooms", 0, "number of rooms to create with -room=new, or expected room count for a room list (0 = infer/default 1)")
 	dns := flag.String("dns", "1.1.1.1:53", "DNS server")
 	socksProxy := flag.String("socks", "", "upstream SOCKS5 proxy addr:port")
 	verbose := flag.Bool("v", false, "verbose logging")
@@ -51,7 +50,7 @@ func main() {
 	// Setup API client
 	api := jazz.NewAPIClient(logger)
 
-	roomSpecs, err := resolveRooms(api, *room, *roomsFlag, logger)
+	roomSpec, err := resolveRoom(api, *room, logger)
 	if err != nil {
 		logger.Error("room config error", "error", err)
 		os.Exit(1)
@@ -68,7 +67,7 @@ func main() {
 
 	manager, err := jazz.NewManager(jazz.ManagerConfig{
 		APIClient:    api,
-		Rooms:        roomSpecs,
+		Room:         roomSpec,
 		PeersPerRoom: peerCount,
 		Role:         "server",
 		Logger:       logger,
@@ -85,11 +84,18 @@ func main() {
 	}
 
 	logger.Info("all peers connected",
-		"rooms", len(roomSpecs),
-		"roomArg", jazz.JoinRoomURLs(roomSpecs),
+		"roomId", roomSpec.RoomID,
+		"roomURL", roomSpec.URL,
 		"peersPerRoom", peerCount,
 		"totalPeers", len(peers),
-		"key", hex.EncodeToString(keyBytes),
+	)
+	logger.Info("jazztun server ready",
+		"roomId", roomSpec.RoomID,
+		"peersPerRoom", peerCount,
+		"totalPeers", len(peers),
+		"dns", *dns,
+		"socks", *socksProxy,
+		"keyPrefix", hex.EncodeToString(keyBytes[:4]),
 	)
 
 	// Create and run tunnel server
@@ -150,37 +156,38 @@ func resolveKey(keyHex string) ([]byte, error) {
 	return key, nil
 }
 
-func resolveRooms(api *jazz.APIClient, roomArg string, roomCount int, logger *slog.Logger) ([]jazz.RoomSpec, error) {
+func resolveRoom(api *jazz.APIClient, roomArg string, logger *slog.Logger) (jazz.RoomSpec, error) {
 	if roomArg == "" {
-		return nil, fmt.Errorf("room is required (-room flag)")
+		return jazz.RoomSpec{}, fmt.Errorf("room is required (-room flag)")
 	}
 
 	if roomArg == "new" {
-		if roomCount <= 0 {
-			roomCount = 1
-		}
-		rooms, err := api.CreateRooms(roomCount)
+		resp, err := api.CreateRoom()
 		if err != nil {
-			return nil, fmt.Errorf("create rooms: %w", err)
+			return jazz.RoomSpec{}, fmt.Errorf("create room: %w", err)
 		}
-		for i, room := range rooms {
-			logger.Info("created room",
-				"index", i+1,
-				"roomId", room.RoomID,
-				"url", room.URL,
-			)
-		}
-		logger.Info("created room set", "rooms", len(rooms), "roomArg", jazz.JoinRoomURLs(rooms))
-		return rooms, nil
+		logger.Info("created room",
+			"roomId", resp.RoomID,
+			"url", resp.URL,
+		)
+		return jazz.RoomSpec{
+			RoomID:   resp.RoomID,
+			Password: resp.Password,
+			URL:      resp.URL,
+		}, nil
 	}
 
-	rooms, err := jazz.ParseRoomList(roomArg)
+	roomID, password, err := jazz.ParseRoomURL(roomArg)
 	if err != nil {
-		return nil, err
+		return jazz.RoomSpec{}, fmt.Errorf("parse room URL: %w", err)
 	}
-	if roomCount > 0 && len(rooms) != roomCount {
-		return nil, fmt.Errorf("expected %d rooms, got %d", roomCount, len(rooms))
+	if password == "" {
+		return jazz.RoomSpec{}, fmt.Errorf("room URL must include password (psw parameter)")
 	}
 
-	return rooms, nil
+	return jazz.RoomSpec{
+		RoomID:   roomID,
+		Password: password,
+		URL:      roomArg,
+	}, nil
 }

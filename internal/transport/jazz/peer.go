@@ -21,6 +21,7 @@ const (
 	reconnectWindow      = 5 * time.Minute
 	reconnectBaseDelay   = 2 * time.Second
 	reconnectMaxDelay    = 30 * time.Second
+	targetReadyTimeout   = 45 * time.Second
 	dcLabel              = "_reliable"
 )
 
@@ -139,7 +140,7 @@ func (p *Peer) Connect(ctx context.Context) error {
 					select {
 					case <-p.targetReadyCh:
 						p.log.Info("target participant ready", "name", p.targetParticipantName)
-					case <-time.After(15 * time.Second):
+					case <-time.After(targetReadyTimeout):
 						return fmt.Errorf("target participant %q not discovered", p.targetParticipantName)
 					case <-ctx.Done():
 						return ctx.Err()

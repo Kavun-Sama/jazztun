@@ -123,7 +123,7 @@ func (s *Server) handleStream(stream *mux.Stream) {
 		return
 	}
 
-	addr := fmt.Sprintf("%s:%d", req.Addr, req.Port)
+	addr := net.JoinHostPort(req.Addr, strconv.Itoa(req.Port))
 	s.log.Info("connecting", "addr", addr, "clientID", stream.Key.ClientID, "sid", stream.Key.SID)
 
 	// Dial the target
