@@ -11,10 +11,10 @@ import (
 	"os/signal"
 	"syscall"
 
-	"github.com/Kavun-Sama/salute-ajazz-rtc-tunnel/internal/crypto"
-	"github.com/Kavun-Sama/salute-ajazz-rtc-tunnel/internal/transport"
-	"github.com/Kavun-Sama/salute-ajazz-rtc-tunnel/internal/transport/jazz"
-	"github.com/Kavun-Sama/salute-ajazz-rtc-tunnel/internal/tunnel"
+	"github.com/Kavun-Sama/salute-jazz-rtc-tunnel/internal/crypto"
+	"github.com/Kavun-Sama/salute-jazz-rtc-tunnel/internal/transport"
+	"github.com/Kavun-Sama/salute-jazz-rtc-tunnel/internal/transport/jazz"
+	"github.com/Kavun-Sama/salute-jazz-rtc-tunnel/internal/tunnel"
 )
 
 func main() {

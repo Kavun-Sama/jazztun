@@ -1,6 +1,7 @@
 package mux
 
 import (
+	"encoding/binary"
 	"sync"
 	"testing"
 	"time"
@@ -22,7 +23,6 @@ func TestDataFrameDelivered(t *testing.T) {
 		streamCh <- s
 	}, nil)
 
-	// Build a DATA frame for client 1, stream 5
 	payload := []byte("hello mux")
 	frame := MakeFrame(1, 5, FlagData, payload)
 
@@ -51,7 +51,6 @@ func TestDataRoutedToCorrectStream(t *testing.T) {
 		streams <- s
 	}, nil)
 
-	// Create two different streams
 	frame1 := MakeFrame(1, 1, FlagData, []byte("stream-1"))
 	frame2 := MakeFrame(1, 2, FlagData, []byte("stream-2"))
 	frame3 := MakeFrame(2, 1, FlagData, []byte("stream-3"))
@@ -60,7 +59,6 @@ func TestDataRoutedToCorrectStream(t *testing.T) {
 	m.HandleFrame(frame2)
 	m.HandleFrame(frame3)
 
-	// Collect all 3 new streams
 	got := make(map[StreamKey]*Stream)
 	for i := 0; i < 3; i++ {
 		select {
@@ -71,7 +69,6 @@ func TestDataRoutedToCorrectStream(t *testing.T) {
 		}
 	}
 
-	// Verify data on each stream
 	tests := []struct {
 		key  StreamKey
 		want string
@@ -101,7 +98,6 @@ func TestCloseFrameClosesStream(t *testing.T) {
 		streamCh <- s
 	}, nil)
 
-	// First send a DATA frame to create the stream
 	m.HandleFrame(MakeFrame(1, 1, FlagData, []byte("data")))
 
 	var s *Stream
@@ -111,19 +107,13 @@ func TestCloseFrameClosesStream(t *testing.T) {
 		t.Fatal("timed out waiting for stream")
 	}
 
-	// Read the data
 	_ = s.Read()
 
-	// Now send CLOSE frame
 	m.HandleFrame(MakeFrame(1, 1, FlagClose, nil))
 
-	// Channel should be closed
-	data := s.Read()
-	if data != nil {
+	if data := s.Read(); data != nil {
 		t.Fatalf("expected nil after close, got %q", data)
 	}
-
-	// Stream should be removed from mux
 	if m.GetStream(StreamKey{1, 1}) != nil {
 		t.Fatal("stream should be removed after close")
 	}
@@ -140,32 +130,25 @@ func TestResetClosesAllClientStreams(t *testing.T) {
 		streamsMu.Unlock()
 	}, nil)
 
-	// Create multiple streams for client 1
 	m.HandleFrame(MakeFrame(1, 1, FlagData, []byte("a")))
 	m.HandleFrame(MakeFrame(1, 2, FlagData, []byte("b")))
 	m.HandleFrame(MakeFrame(1, 3, FlagData, []byte("c")))
-	// And one for client 2
 	m.HandleFrame(MakeFrame(2, 1, FlagData, []byte("d")))
 
-	time.Sleep(50 * time.Millisecond) // let callbacks fire
+	time.Sleep(50 * time.Millisecond)
 
-	// Reset client 1
 	m.HandleFrame(MakeFrame(1, 0, FlagReset, nil))
 
 	time.Sleep(50 * time.Millisecond)
 
-	// Client 1 streams should be closed
 	streamsMu.Lock()
 	for key, s := range allStreams {
-		if key.ClientID == 1 {
-			if !s.IsClosed() {
-				t.Fatalf("stream %+v should be closed after reset", key)
-			}
+		if key.ClientID == 1 && !s.IsClosed() {
+			t.Fatalf("stream %+v should be closed after reset", key)
 		}
 	}
 	streamsMu.Unlock()
 
-	// Client 2 stream should still exist
 	if m.GetStream(StreamKey{2, 1}) == nil {
 		t.Fatal("client 2 stream should survive client 1 reset")
 	}
@@ -197,43 +180,133 @@ func TestMakeFrameParseFrame(t *testing.T) {
 }
 
 func TestStreamWrite(t *testing.T) {
-	var sent [][]byte
-	var mu sync.Mutex
-
+	frames := make(chan []byte, 4)
 	sendFn := func(data []byte) error {
 		cp := make([]byte, len(data))
 		copy(cp, data)
-		mu.Lock()
-		sent = append(sent, cp)
-		mu.Unlock()
+		frames <- cp
 		return nil
 	}
 
 	m := NewMux(sendFn, nil, nil)
 	s := m.OpenStream(StreamKey{ClientID: 1, SID: 10})
 
-	err := s.Write([]byte("hello"))
-	if err != nil {
+	if err := s.Write([]byte("hello")); err != nil {
 		t.Fatal(err)
 	}
 
+	select {
+	case frame := <-frames:
+		_, _, _, flags, payload, err := ParseFrame(frame)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if flags != FlagData {
+			t.Fatalf("expected DATA flag, got %x", flags)
+		}
+		if string(payload) != "hello" {
+			t.Fatalf("expected payload 'hello', got %q", payload)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for queued frame")
+	}
+}
+
+func TestReadSendsWindowUpdate(t *testing.T) {
+	frames := make(chan []byte, 4)
+	sendFn := func(data []byte) error {
+		cp := make([]byte, len(data))
+		copy(cp, data)
+		frames <- cp
+		return nil
+	}
+
+	m := NewMux(sendFn, nil, nil)
+	stream := m.OpenStream(StreamKey{ClientID: 1, SID: 11})
+
+	m.HandleFrame(MakeFrame(1, 11, FlagData, []byte("abc")))
+
+	if got := string(stream.Read()); got != "abc" {
+		t.Fatalf("got %q, want abc", got)
+	}
+
+	select {
+	case frame := <-frames:
+		_, _, _, flags, payload, err := ParseFrame(frame)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if flags != FlagWindowUpdate {
+			t.Fatalf("expected WINDOW_UPDATE flag, got %x", flags)
+		}
+		if len(payload) != 4 || binary.BigEndian.Uint32(payload) != 3 {
+			t.Fatalf("unexpected credit payload: %v", payload)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for window update")
+	}
+}
+
+func TestWindowUpdateResumesSending(t *testing.T) {
+	var (
+		mu        sync.Mutex
+		sentBytes int
+	)
+
+	sendFn := func(data []byte) error {
+		_, _, _, flags, payload, err := ParseFrame(data)
+		if err != nil {
+			return err
+		}
+		if flags == FlagData {
+			mu.Lock()
+			sentBytes += len(payload)
+			mu.Unlock()
+		}
+		return nil
+	}
+
+	m := NewMux(sendFn, nil, nil)
+	stream := m.OpenStream(StreamKey{ClientID: 1, SID: 12})
+
+	payload := make([]byte, initialSendWindow+maxChunk)
+	if err := stream.Write(payload); err != nil {
+		t.Fatal(err)
+	}
+
+	waitFor := func(want int) {
+		t.Helper()
+		deadline := time.Now().Add(2 * time.Second)
+		for time.Now().Before(deadline) {
+			mu.Lock()
+			got := sentBytes
+			mu.Unlock()
+			if got >= want {
+				return
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+		mu.Lock()
+		got := sentBytes
+		mu.Unlock()
+		t.Fatalf("sent bytes: got %d, want at least %d", got, want)
+	}
+
+	waitFor(initialSendWindow)
+
+	time.Sleep(100 * time.Millisecond)
 	mu.Lock()
-	defer mu.Unlock()
-
-	if len(sent) != 1 {
-		t.Fatalf("expected 1 frame sent, got %d", len(sent))
+	before := sentBytes
+	mu.Unlock()
+	if before != initialSendWindow {
+		t.Fatalf("expected scheduler to stop at window, got %d", before)
 	}
 
-	_, _, _, flags, payload, err := ParseFrame(sent[0])
-	if err != nil {
-		t.Fatal(err)
-	}
-	if flags != FlagData {
-		t.Fatalf("expected DATA flag, got %x", flags)
-	}
-	if string(payload) != "hello" {
-		t.Fatalf("expected payload 'hello', got %q", payload)
-	}
+	credit := make([]byte, 4)
+	binary.BigEndian.PutUint32(credit, maxChunk)
+	m.HandleFrame(MakeFrame(1, 12, FlagWindowUpdate, credit))
+
+	waitFor(initialSendWindow + maxChunk)
 }
 
 func TestHandleDataBackpressureDoesNotDropFrames(t *testing.T) {
@@ -258,8 +331,7 @@ func TestHandleDataBackpressureDoesNotDropFrames(t *testing.T) {
 	case <-time.After(100 * time.Millisecond):
 	}
 
-	got := stream.Read()
-	if len(got) != 1 || got[0] != 0 {
+	if got := stream.Read(); len(got) != 1 || got[0] != 0 {
 		t.Fatalf("unexpected first payload: %v", got)
 	}
 
@@ -270,7 +342,7 @@ func TestHandleDataBackpressureDoesNotDropFrames(t *testing.T) {
 	}
 
 	for i := 1; i < maxPendingFrames+1; i++ {
-		got = stream.Read()
+		got := stream.Read()
 		if len(got) != 1 || got[0] != byte(i) {
 			t.Fatalf("payload %d: got %v", i, got)
 		}
