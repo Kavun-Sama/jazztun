@@ -4,8 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log/slog"
 	"net"
+	"strconv"
 	"sync"
 	"time"
 
@@ -115,7 +117,7 @@ func (s *Server) handleStream(stream *mux.Stream) {
 		return
 	}
 
-	if req.Cmd != "connect" {
+	if req.Cmd != cmdConnect {
 		s.log.Warn("unknown command", "cmd", req.Cmd)
 		stream.Close()
 		return
@@ -156,13 +158,15 @@ func (s *Server) handleStream(stream *mux.Stream) {
 	s.conns[stream.Key] = conn
 	s.connsMu.Unlock()
 
-	defer func() {
+	var once sync.Once
+	cleanup := func() {
 		conn.Close()
 		s.connsMu.Lock()
 		delete(s.conns, stream.Key)
 		s.connsMu.Unlock()
 		stream.Close()
-	}()
+	}
+	defer once.Do(cleanup)
 
 	// Send confirmation byte (0x00)
 	if err := stream.Write([]byte{0x00}); err != nil {
@@ -205,7 +209,9 @@ func (s *Server) handleStream(stream *mux.Stream) {
 		}
 	}()
 
-	// Wait for either direction to finish
+	// Wait for either direction to finish, then force the other side to unwind too.
+	<-done
+	once.Do(cleanup)
 	<-done
 }
 
@@ -227,39 +233,14 @@ func (s *Server) sendFrame(data []byte) error {
 
 	if flags&mux.FlagReset != 0 {
 		for _, peer := range s.peers {
-			if err := s.sendFrameToPeer(peer, data); err != nil {
+			if err := sendEncryptedFrame(peer, s.cipher, data); err != nil {
 				return err
 			}
 		}
 		return nil
 	}
 
-	return s.sendFrameToPeer(s.peers[s.streamPeerIndex(clientID, sid)], data)
-}
-
-func (s *Server) sendFrameToPeer(peer transport.Transport, data []byte) error {
-	encrypted, err := s.cipher.Encrypt(data)
-	if err != nil {
-		return fmt.Errorf("encrypt: %w", err)
-	}
-
-	tick := time.NewTicker(1 * time.Millisecond)
-	defer tick.Stop()
-
-	for {
-		if peer.CanSend() {
-			return peer.Send(encrypted)
-		}
-		<-tick.C
-	}
-}
-
-func (s *Server) streamPeerIndex(clientID uint32, sid uint16) int {
-	if len(s.peers) == 1 {
-		return 0
-	}
-	hash := clientID*2654435761 ^ uint32(sid)
-	return int(hash % uint32(len(s.peers)))
+	return sendEncryptedFrame(s.peers[streamPeerIndex(len(s.peers), clientID, sid)], s.cipher, data)
 }
 
 func (s *Server) closeAllConns() {
@@ -286,14 +267,9 @@ func (s *Server) dialViaSocks(addr string) (net.Conn, error) {
 		return nil, fmt.Errorf("socks auth: %w", err)
 	}
 
-	authResp := make([]byte, 2)
-	if _, err := conn.Read(authResp); err != nil {
+	if err := readSocksAuthResponse(conn); err != nil {
 		conn.Close()
-		return nil, fmt.Errorf("socks auth response: %w", err)
-	}
-	if authResp[0] != 0x05 || authResp[1] != 0x00 {
-		conn.Close()
-		return nil, fmt.Errorf("socks auth rejected")
+		return nil, err
 	}
 
 	// Parse host:port
@@ -303,8 +279,11 @@ func (s *Server) dialViaSocks(addr string) (net.Conn, error) {
 		return nil, fmt.Errorf("split host port: %w", err)
 	}
 
-	portNum := 0
-	fmt.Sscanf(port, "%d", &portNum)
+	portNum, err := strconv.Atoi(port)
+	if err != nil || portNum < 0 || portNum > 65535 {
+		conn.Close()
+		return nil, fmt.Errorf("invalid port %q", port)
+	}
 
 	// CONNECT request with domain
 	req := []byte{0x05, 0x01, 0x00, 0x03, byte(len(host))}
@@ -316,15 +295,64 @@ func (s *Server) dialViaSocks(addr string) (net.Conn, error) {
 		return nil, fmt.Errorf("socks connect: %w", err)
 	}
 
-	resp := make([]byte, 10)
-	if _, err := conn.Read(resp); err != nil {
+	if err := readSocksConnectResponse(conn); err != nil {
 		conn.Close()
-		return nil, fmt.Errorf("socks connect response: %w", err)
-	}
-	if resp[1] != 0x00 {
-		conn.Close()
-		return nil, fmt.Errorf("socks connect failed: rep=%d", resp[1])
+		return nil, err
 	}
 
 	return conn, nil
+}
+
+func readSocksAuthResponse(r io.Reader) error {
+	resp := make([]byte, 2)
+	if _, err := io.ReadFull(r, resp); err != nil {
+		return fmt.Errorf("socks auth response: %w", err)
+	}
+	if resp[0] != 0x05 || resp[1] != 0x00 {
+		return fmt.Errorf("socks auth rejected")
+	}
+	return nil
+}
+
+func readSocksConnectResponse(r io.Reader) error {
+	header := make([]byte, 4)
+	if _, err := io.ReadFull(r, header); err != nil {
+		return fmt.Errorf("socks connect response header: %w", err)
+	}
+	if header[0] != 0x05 {
+		return fmt.Errorf("invalid socks version: %d", header[0])
+	}
+	if header[1] != 0x00 {
+		return fmt.Errorf("socks connect failed: rep=%d", header[1])
+	}
+
+	addrLen := 0
+	switch header[3] {
+	case 0x01:
+		addrLen = net.IPv4len
+	case 0x03:
+		domainLen := make([]byte, 1)
+		if _, err := io.ReadFull(r, domainLen); err != nil {
+			return fmt.Errorf("socks connect domain length: %w", err)
+		}
+		addrLen = int(domainLen[0])
+	case 0x04:
+		addrLen = net.IPv6len
+	default:
+		return fmt.Errorf("unsupported socks bind atyp: %d", header[3])
+	}
+
+	if addrLen > 0 {
+		addr := make([]byte, addrLen)
+		if _, err := io.ReadFull(r, addr); err != nil {
+			return fmt.Errorf("socks connect bind addr: %w", err)
+		}
+	}
+
+	port := make([]byte, 2)
+	if _, err := io.ReadFull(r, port); err != nil {
+		return fmt.Errorf("socks connect bind port: %w", err)
+	}
+
+	return nil
 }

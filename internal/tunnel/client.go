@@ -116,7 +116,7 @@ func (c *Client) handleConnect(conn net.Conn, host string, port int) {
 
 	// Send connect request
 	req := ConnectRequest{
-		Cmd:  "connect",
+		Cmd:  cmdConnect,
 		Addr: host,
 		Port: port,
 	}
@@ -144,6 +144,7 @@ func (c *Client) handleConnect(conn net.Conn, host string, port int) {
 
 	firstFrameCh := make(chan []byte, 1)
 	go func() {
+		// stream.Close() on timeout unblocks Read(), so this helper goroutine does not leak.
 		firstFrameCh <- stream.Read()
 	}()
 
@@ -254,39 +255,14 @@ func (c *Client) sendFrame(data []byte) error {
 
 	if flags&mux.FlagReset != 0 {
 		for _, peer := range c.peers {
-			if err := c.sendFrameToPeer(peer, data); err != nil {
+			if err := sendEncryptedFrame(peer, c.cipher, data); err != nil {
 				return err
 			}
 		}
 		return nil
 	}
 
-	return c.sendFrameToPeer(c.peers[c.streamPeerIndex(clientID, sid)], data)
-}
-
-func (c *Client) sendFrameToPeer(peer transport.Transport, data []byte) error {
-	encrypted, err := c.cipher.Encrypt(data)
-	if err != nil {
-		return fmt.Errorf("encrypt: %w", err)
-	}
-
-	tick := time.NewTicker(1 * time.Millisecond)
-	defer tick.Stop()
-
-	for {
-		if peer.CanSend() {
-			return peer.Send(encrypted)
-		}
-		<-tick.C
-	}
-}
-
-func (c *Client) streamPeerIndex(clientID uint32, sid uint16) int {
-	if len(c.peers) == 1 {
-		return 0
-	}
-	hash := clientID*2654435761 ^ uint32(sid)
-	return int(hash % uint32(len(c.peers)))
+	return sendEncryptedFrame(c.peers[streamPeerIndex(len(c.peers), clientID, sid)], c.cipher, data)
 }
 
 // sendReset sends a RESET frame to clear server-side state for this client.
