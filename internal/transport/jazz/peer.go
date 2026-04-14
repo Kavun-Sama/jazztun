@@ -21,7 +21,6 @@ const (
 	reconnectWindow      = 5 * time.Minute
 	reconnectBaseDelay   = 2 * time.Second
 	reconnectMaxDelay    = 30 * time.Second
-	targetReadyTimeout   = 45 * time.Second
 	dcLabel              = "_reliable"
 )
 
@@ -139,13 +138,12 @@ func (p *Peer) Connect(ctx context.Context) error {
 			case <-p.pubReadyCh:
 				p.log.Info("publisher data channel ready")
 				if p.targetParticipantName != "" {
-					select {
-					case <-p.targetReadyCh:
+					if len(p.destinationIdentities()) > 0 {
 						p.log.Info("target participant ready", "name", p.targetParticipantName)
-					case <-time.After(targetReadyTimeout):
-						return fmt.Errorf("target participant %q not discovered", p.targetParticipantName)
-					case <-ctx.Done():
-						return ctx.Err()
+					} else {
+						// Starting the server before the client is a normal workflow.
+						// Keep the transport up and wait for the counterpart to join later.
+						p.log.Info("waiting for target participant", "name", p.targetParticipantName)
 					}
 				}
 			case <-time.After(10 * time.Second):
