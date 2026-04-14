@@ -138,12 +138,15 @@ func (p *Peer) Connect(ctx context.Context) error {
 			case <-p.pubReadyCh:
 				p.log.Info("publisher data channel ready")
 				if p.targetParticipantName != "" {
-					if len(p.destinationIdentities()) > 0 {
-						p.log.Info("target participant ready", "name", p.targetParticipantName)
-					} else {
+					switch p.destinationCount() {
+					case 0:
 						// Starting the server before the client is a normal workflow.
 						// Keep the transport up and wait for the counterpart to join later.
 						p.log.Info("waiting for target participant", "name", p.targetParticipantName)
+					case 1:
+						p.log.Info("target participant ready", "name", p.targetParticipantName)
+					default:
+						p.log.Warn("duplicate target participants detected", "name", p.targetParticipantName, "matches", p.destinationCount())
 					}
 				}
 			case <-time.After(10 * time.Second):
@@ -171,7 +174,12 @@ func (p *Peer) Send(data []byte) error {
 		return fmt.Errorf("data channel not ready")
 	}
 
-	packet, err := EncodeDataPacket(data, p.destinationIdentities())
+	destinations := p.destinationIdentities()
+	if p.targetParticipantName != "" && len(destinations) != 1 {
+		return fmt.Errorf("target participant state invalid: %d matches", len(destinations))
+	}
+
+	packet, err := EncodeDataPacket(data, destinations)
 	if err != nil {
 		return err
 	}
@@ -229,7 +237,7 @@ func (p *Peer) CanSend() bool {
 	if dc == nil {
 		return false
 	}
-	if p.targetParticipantName != "" && len(p.destinationIdentities()) == 0 {
+	if p.targetParticipantName != "" && p.destinationCount() != 1 {
 		return false
 	}
 	return dc.BufferedAmount() < maxBufferedAmount
@@ -939,6 +947,16 @@ func (p *Peer) updateRemoteIdentity(identity, name, state string) {
 			}
 		}
 	}
+
+	if p.targetParticipantName != "" && len(p.remoteIdentities) > 1 {
+		p.log.Warn("multiple matching target participants present", "name", p.targetParticipantName, "matches", len(p.remoteIdentities))
+	}
+}
+
+func (p *Peer) destinationCount() int {
+	p.remoteIdentitiesMu.RLock()
+	defer p.remoteIdentitiesMu.RUnlock()
+	return len(p.remoteIdentities)
 }
 
 func (p *Peer) destinationIdentities() []string {

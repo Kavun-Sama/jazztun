@@ -14,6 +14,7 @@ type Manager struct {
 	apiClient    *APIClient
 	room         RoomSpec
 	peersPerRoom int
+	sessionID    string
 	role         string
 	log          *slog.Logger
 }
@@ -23,6 +24,7 @@ type ManagerConfig struct {
 	APIClient    *APIClient
 	Room         RoomSpec
 	PeersPerRoom int
+	SessionID    string
 	Role         string
 	Logger       *slog.Logger
 }
@@ -38,6 +40,9 @@ func NewManager(cfg ManagerConfig) (*Manager, error) {
 	if cfg.PeersPerRoom <= 0 {
 		return nil, fmt.Errorf("peers per room must be > 0")
 	}
+	if cfg.SessionID == "" {
+		return nil, fmt.Errorf("session id is required")
+	}
 	if cfg.Role != "client" && cfg.Role != "server" {
 		return nil, fmt.Errorf("invalid role %q", cfg.Role)
 	}
@@ -49,6 +54,7 @@ func NewManager(cfg ManagerConfig) (*Manager, error) {
 		apiClient:    cfg.APIClient,
 		room:         cfg.Room,
 		peersPerRoom: cfg.PeersPerRoom,
+		sessionID:    cfg.SessionID,
 		role:         cfg.Role,
 		log:          cfg.Logger.With(slog.String("component", "jazz/manager")),
 	}, nil
@@ -83,11 +89,12 @@ func (m *Manager) ConnectAll(ctx context.Context) ([]transport.Transport, error)
 				Password:              m.room.Password,
 				ConnectorURL:          connectorURL,
 				APIClient:             m.apiClient,
-				ParticipantName:       peerName(m.role, peerIndex),
-				TargetParticipantName: peerName(oppositeRole(m.role), peerIndex),
+				ParticipantName:       peerName(m.role, m.sessionID, peerIndex),
+				TargetParticipantName: peerName(oppositeRole(m.role), m.sessionID, peerIndex),
 				Logger: m.log.With(
 					slog.Int("peerIndex", peerIndex+1),
 					slog.String("roomId", m.room.RoomID),
+					slog.String("session", m.sessionID),
 				),
 			})
 
@@ -116,8 +123,8 @@ func (m *Manager) ConnectAll(ctx context.Context) ([]transport.Transport, error)
 	return peers, nil
 }
 
-func peerName(role string, peerIndex int) string {
-	return fmt.Sprintf("jazztun-%s-%d", role, peerIndex+1)
+func peerName(role, sessionID string, peerIndex int) string {
+	return fmt.Sprintf("jazztun-%s-%s-%d", role, sessionID, peerIndex+1)
 }
 
 func oppositeRole(role string) string {

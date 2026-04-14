@@ -14,14 +14,17 @@ import (
 
 	"github.com/Kavun-Sama/jazztun/internal/buildinfo"
 	"github.com/Kavun-Sama/jazztun/internal/crypto"
+	"github.com/Kavun-Sama/jazztun/internal/session"
 	"github.com/Kavun-Sama/jazztun/internal/socks"
 	"github.com/Kavun-Sama/jazztun/internal/transport/jazz"
+	securetransport "github.com/Kavun-Sama/jazztun/internal/transport/secure"
 	"github.com/Kavun-Sama/jazztun/internal/tunnel"
 )
 
 func main() {
 	room := flag.String("room", "", "Jazz room URL")
 	key := flag.String("key", "", "hex 32 bytes encryption key")
+	sessionToken := flag.String("session", "", "optional session namespace for sharing one Jazz room across multiple tunnel pairs")
 	listen := flag.String("listen", "127.0.0.1:1080", "local SOCKS5 address")
 	socksUser := flag.String("socks-user", "", "SOCKS5 username for local proxy auth")
 	socksPass := flag.String("socks-pass", "", "SOCKS5 password for local proxy auth")
@@ -73,6 +76,7 @@ func main() {
 		logger.Error("cipher error", "error", err)
 		os.Exit(1)
 	}
+	sessionID := session.DeriveID(keyBytes, *sessionToken)
 
 	roomSpec, err := resolveRoom(*room)
 	if err != nil {
@@ -95,6 +99,7 @@ func main() {
 		APIClient:    api,
 		Room:         roomSpec,
 		PeersPerRoom: peerCount,
+		SessionID:    sessionID,
 		Role:         "client",
 		Logger:       logger,
 	})
@@ -108,6 +113,12 @@ func main() {
 		logger.Error("peer connect failed", "error", err)
 		os.Exit(1)
 	}
+	peers = securetransport.WrapAll(ctx, peers, securetransport.Config{
+		Cipher:    cipher,
+		SessionID: sessionID,
+		Role:      "client",
+		Logger:    logger,
+	})
 
 	// Generate client ID
 	clientID := generateClientID()
@@ -124,7 +135,7 @@ func main() {
 		},
 		Logger: logger,
 	})
-	printClientStartup(*listen, roomSpec.RoomID, peerCount, *socksUser != "", clientID)
+	printClientStartup(*listen, roomSpec.RoomID, *sessionToken, peerCount, *socksUser != "", clientID)
 
 	// Handle signals
 	sigCh := make(chan os.Signal, 1)
@@ -181,10 +192,13 @@ func resolveRoom(roomArg string) (jazz.RoomSpec, error) {
 	}, nil
 }
 
-func printClientStartup(listen, roomID string, peers int, socksAuth bool, clientID uint32) {
+func printClientStartup(listen, roomID, sessionToken string, peers int, socksAuth bool, clientID uint32) {
 	fmt.Printf("jazztun %s client ready\n", buildinfo.Version)
 	fmt.Printf("  listen:     %s\n", listen)
 	fmt.Printf("  room id:    %s\n", roomID)
+	if sessionToken != "" {
+		fmt.Printf("  session:    %s\n", sessionToken)
+	}
 	fmt.Printf("  peers:      %d\n", peers)
 	fmt.Printf("  socks auth: %t\n", socksAuth)
 	fmt.Printf("  client id:  %08x\n", clientID)

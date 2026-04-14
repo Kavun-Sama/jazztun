@@ -14,14 +14,17 @@ import (
 
 	"github.com/Kavun-Sama/jazztun/internal/buildinfo"
 	"github.com/Kavun-Sama/jazztun/internal/crypto"
+	"github.com/Kavun-Sama/jazztun/internal/session"
 	"github.com/Kavun-Sama/jazztun/internal/transport"
 	"github.com/Kavun-Sama/jazztun/internal/transport/jazz"
+	securetransport "github.com/Kavun-Sama/jazztun/internal/transport/secure"
 	"github.com/Kavun-Sama/jazztun/internal/tunnel"
 )
 
 func main() {
 	room := flag.String("room", "", "Jazz room URL or 'new' to create a room")
 	key := flag.String("key", "", "hex 32 bytes encryption key (if empty, generate and print)")
+	sessionToken := flag.String("session", "", "optional session namespace for sharing one Jazz room across multiple tunnel pairs")
 	duo := flag.Bool("duo", false, "use 2 transport peers in parallel")
 	peersFlag := flag.Int("peers", 0, "number of transport peers to open (overrides -duo)")
 	versionFlag := flag.Bool("version", false, "print version and exit")
@@ -55,6 +58,7 @@ func main() {
 		logger.Error("cipher error", "error", err)
 		os.Exit(1)
 	}
+	sessionID := session.DeriveID(keyBytes, *sessionToken)
 
 	// Setup API client
 	api := jazz.NewAPIClient(logger)
@@ -78,6 +82,7 @@ func main() {
 		APIClient:    api,
 		Room:         roomSpec,
 		PeersPerRoom: peerCount,
+		SessionID:    sessionID,
 		Role:         "server",
 		Logger:       logger,
 	})
@@ -91,8 +96,14 @@ func main() {
 		logger.Error("peer connect failed", "error", err)
 		os.Exit(1)
 	}
+	peers = securetransport.WrapAll(ctx, peers, securetransport.Config{
+		Cipher:    cipher,
+		SessionID: sessionID,
+		Role:      "server",
+		Logger:    logger,
+	})
 
-	printServerStartup(roomSpec, hex.EncodeToString(keyBytes), generatedKey, peerCount, *dns, *socksProxy)
+	printServerStartup(roomSpec, hex.EncodeToString(keyBytes), generatedKey, *sessionToken, peerCount, *dns, *socksProxy)
 	go watchClientStatus(ctx, peers)
 
 	// Create and run tunnel server
@@ -188,7 +199,7 @@ func resolveRoom(api *jazz.APIClient, roomArg string, logger *slog.Logger) (jazz
 	}, nil
 }
 
-func printServerStartup(room jazz.RoomSpec, key string, generatedKey bool, peers int, dns, socks string) {
+func printServerStartup(room jazz.RoomSpec, key string, generatedKey bool, sessionToken string, peers int, dns, socks string) {
 	fmt.Printf("jazztun %s server ready\n", buildinfo.Version)
 	fmt.Printf("  room id:   %s\n", room.RoomID)
 	fmt.Printf("  room url:  %s\n", room.URL)
@@ -199,6 +210,9 @@ func printServerStartup(room jazz.RoomSpec, key string, generatedKey bool, peers
 	} else {
 		fmt.Printf("  key mode:  provided\n")
 	}
+	if sessionToken != "" {
+		fmt.Printf("  session:   %s\n", sessionToken)
+	}
 	fmt.Printf("  peers:     %d\n", peers)
 	fmt.Printf("  dns:       %s\n", dns)
 	if socks != "" {
@@ -206,10 +220,17 @@ func printServerStartup(room jazz.RoomSpec, key string, generatedKey bool, peers
 	}
 	fmt.Println()
 	fmt.Println("Client examples")
-	fmt.Printf("  Windows: .\\client.exe -room \"%s\" -key %s -peers %d -listen 127.0.0.1:1080\n", room.URL, key, peers)
-	fmt.Printf("  Linux:   ./client -room '%s' -key %s -peers %d -listen 127.0.0.1:1080\n", room.URL, key, peers)
-	fmt.Printf("  Termux:  ./client -room '%s' -key %s -peers %d -listen 127.0.0.1:1080\n", room.URL, key, peers)
+	fmt.Printf("  Windows: .\\client.exe -room \"%s\" -key %s%s -peers %d -listen 127.0.0.1:1080\n", room.URL, key, sessionArg(sessionToken), peers)
+	fmt.Printf("  Linux:   ./client -room '%s' -key %s%s -peers %d -listen 127.0.0.1:1080\n", room.URL, key, sessionArg(sessionToken), peers)
+	fmt.Printf("  Termux:  ./client -room '%s' -key %s%s -peers %d -listen 127.0.0.1:1080\n", room.URL, key, sessionArg(sessionToken), peers)
 	fmt.Println()
+}
+
+func sessionArg(sessionToken string) string {
+	if sessionToken == "" {
+		return ""
+	}
+	return " -session " + sessionToken
 }
 
 func watchClientStatus(ctx context.Context, peers []transport.Transport) {
