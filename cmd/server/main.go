@@ -10,9 +10,11 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"github.com/Kavun-Sama/jazztun/internal/buildinfo"
 	"github.com/Kavun-Sama/jazztun/internal/crypto"
+	"github.com/Kavun-Sama/jazztun/internal/transport"
 	"github.com/Kavun-Sama/jazztun/internal/transport/jazz"
 	"github.com/Kavun-Sama/jazztun/internal/tunnel"
 )
@@ -91,6 +93,7 @@ func main() {
 	}
 
 	printServerStartup(roomSpec, hex.EncodeToString(keyBytes), generatedKey, peerCount, *dns, *socksProxy)
+	go watchClientStatus(ctx, peers)
 
 	// Create and run tunnel server
 	srv := tunnel.NewServer(tunnel.ServerConfig{
@@ -207,5 +210,44 @@ func printServerStartup(room jazz.RoomSpec, key string, generatedKey bool, peers
 	fmt.Printf("  Linux:   ./client -room '%s' -key %s -peers %d -listen 127.0.0.1:1080\n", room.URL, key, peers)
 	fmt.Printf("  Termux:  ./client -room '%s' -key %s -peers %d -listen 127.0.0.1:1080\n", room.URL, key, peers)
 	fmt.Println()
-	fmt.Println("Waiting for client...")
+}
+
+func watchClientStatus(ctx context.Context, peers []transport.Transport) {
+	ticker := time.NewTicker(1 * time.Second)
+	defer ticker.Stop()
+
+	lastReady := -1
+
+	report := func() {
+		ready := 0
+		for _, peer := range peers {
+			if peer.CanSend() {
+				ready++
+			}
+		}
+		if ready == lastReady {
+			return
+		}
+		lastReady = ready
+
+		switch {
+		case ready == 0:
+			fmt.Println("Waiting for client...")
+		case ready == len(peers):
+			fmt.Printf("Client connected (%d/%d peers ready)\n", ready, len(peers))
+		default:
+			fmt.Printf("Client connecting (%d/%d peers ready)\n", ready, len(peers))
+		}
+	}
+
+	report()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			report()
+		}
+	}
 }
