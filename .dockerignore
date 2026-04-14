@@ -1,0 +1,11 @@
+.git
+.github
+Docs
+bench
+client.exe
+server.exe
+jazztun-client-*
+jazztun-server-*
+*.log
+*.pid
+.DS_Store

@@ -1,0 +1,29 @@
+services:
+  jazztun-server:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        VERSION: ${JAZZTUN_VERSION:-dev}
+    image: jazztun-server:${JAZZTUN_IMAGE_TAG:-local}
+    restart: unless-stopped
+    command:
+      - /bin/sh
+      - -ec
+      - |
+        exec /usr/local/bin/server \
+          -room "${JAZZTUN_ROOM:-new}" \
+          ${JAZZTUN_KEY:+-key "${JAZZTUN_KEY}"} \
+          ${JAZZTUN_SESSION:+-session "${JAZZTUN_SESSION}"} \
+          -peers "${JAZZTUN_PEERS:-4}" \
+          -dns "${JAZZTUN_DNS:-1.1.1.1:53}" \
+          ${JAZZTUN_SOCKS:+-socks "${JAZZTUN_SOCKS}"} \
+          ${JAZZTUN_VERBOSE:+-v}
+    environment:
+      JAZZTUN_ROOM: ${JAZZTUN_ROOM:-new}
+      JAZZTUN_KEY: ${JAZZTUN_KEY:-}
+      JAZZTUN_SESSION: ${JAZZTUN_SESSION:-}
+      JAZZTUN_PEERS: ${JAZZTUN_PEERS:-4}
+      JAZZTUN_DNS: ${JAZZTUN_DNS:-1.1.1.1:53}
+      JAZZTUN_SOCKS: ${JAZZTUN_SOCKS:-}
+      JAZZTUN_VERBOSE: ${JAZZTUN_VERBOSE:-}
