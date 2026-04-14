@@ -34,7 +34,7 @@ func main() {
 	}
 
 	// Setup logging
-	logLevel := slog.LevelInfo
+	logLevel := slog.LevelError
 	if *verbose {
 		logLevel = slog.LevelDebug
 	}
@@ -42,7 +42,7 @@ func main() {
 	slog.SetDefault(logger)
 
 	// Generate or decode key
-	keyBytes, err := resolveKey(*key)
+	keyBytes, generatedKey, err := resolveKey(*key)
 	if err != nil {
 		logger.Error("key error", "error", err)
 		os.Exit(1)
@@ -90,22 +90,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	logger.Info("all peers connected",
-		"version", buildinfo.Version,
-		"roomId", roomSpec.RoomID,
-		"roomURL", roomSpec.URL,
-		"peersPerRoom", peerCount,
-		"totalPeers", len(peers),
-	)
-	logger.Info("jazztun server ready",
-		"version", buildinfo.Version,
-		"roomId", roomSpec.RoomID,
-		"peersPerRoom", peerCount,
-		"totalPeers", len(peers),
-		"dns", *dns,
-		"socks", *socksProxy,
-		"keyPrefix", hex.EncodeToString(keyBytes[:4]),
-	)
+	printServerStartup(roomSpec, hex.EncodeToString(keyBytes), generatedKey, peerCount, *dns, *socksProxy)
 
 	// Create and run tunnel server
 	srv := tunnel.NewServer(tunnel.ServerConfig{
@@ -145,24 +130,23 @@ func resolvePeerCount(peers int, duo bool) (int, error) {
 	return 1, nil
 }
 
-func resolveKey(keyHex string) ([]byte, error) {
+func resolveKey(keyHex string) ([]byte, bool, error) {
 	if keyHex == "" {
 		key := make([]byte, 32)
 		if _, err := rand.Read(key); err != nil {
-			return nil, fmt.Errorf("generate key: %w", err)
+			return nil, false, fmt.Errorf("generate key: %w", err)
 		}
-		fmt.Fprintf(os.Stderr, "Generated key: %s\n", hex.EncodeToString(key))
-		return key, nil
+		return key, true, nil
 	}
 
 	key, err := hex.DecodeString(keyHex)
 	if err != nil {
-		return nil, fmt.Errorf("decode hex key: %w", err)
+		return nil, false, fmt.Errorf("decode hex key: %w", err)
 	}
 	if len(key) != 32 {
-		return nil, fmt.Errorf("key must be 32 bytes, got %d", len(key))
+		return nil, false, fmt.Errorf("key must be 32 bytes, got %d", len(key))
 	}
-	return key, nil
+	return key, false, nil
 }
 
 func resolveRoom(api *jazz.APIClient, roomArg string, logger *slog.Logger) (jazz.RoomSpec, error) {
@@ -199,4 +183,29 @@ func resolveRoom(api *jazz.APIClient, roomArg string, logger *slog.Logger) (jazz
 		Password: password,
 		URL:      roomArg,
 	}, nil
+}
+
+func printServerStartup(room jazz.RoomSpec, key string, generatedKey bool, peers int, dns, socks string) {
+	fmt.Printf("jazztun %s server ready\n", buildinfo.Version)
+	fmt.Printf("  room id:   %s\n", room.RoomID)
+	fmt.Printf("  room url:  %s\n", room.URL)
+	fmt.Printf("  password:  %s\n", room.Password)
+	fmt.Printf("  key:       %s\n", key)
+	if generatedKey {
+		fmt.Printf("  key mode:  generated\n")
+	} else {
+		fmt.Printf("  key mode:  provided\n")
+	}
+	fmt.Printf("  peers:     %d\n", peers)
+	fmt.Printf("  dns:       %s\n", dns)
+	if socks != "" {
+		fmt.Printf("  upstream:  %s\n", socks)
+	}
+	fmt.Println()
+	fmt.Println("Client examples")
+	fmt.Printf("  Windows: .\\client.exe -room \"%s\" -key %s -peers %d -listen 127.0.0.1:1080\n", room.URL, key, peers)
+	fmt.Printf("  Linux:   ./client -room '%s' -key %s -peers %d -listen 127.0.0.1:1080\n", room.URL, key, peers)
+	fmt.Printf("  Termux:  ./client -room '%s' -key %s -peers %d -listen 127.0.0.1:1080\n", room.URL, key, peers)
+	fmt.Println()
+	fmt.Println("Waiting for client...")
 }

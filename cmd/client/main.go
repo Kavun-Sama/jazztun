@@ -37,7 +37,7 @@ func main() {
 	}
 
 	// Setup logging
-	logLevel := slog.LevelInfo
+	logLevel := slog.LevelError
 	if *verbose {
 		logLevel = slog.LevelDebug
 	}
@@ -109,13 +109,6 @@ func main() {
 		os.Exit(1)
 	}
 
-	logger.Info("all peers connected",
-		"version", buildinfo.Version,
-		"roomId", roomSpec.RoomID,
-		"peersPerRoom", peerCount,
-		"totalPeers", len(peers),
-	)
-
 	// Generate client ID
 	clientID := generateClientID()
 
@@ -131,20 +124,7 @@ func main() {
 		},
 		Logger: logger,
 	})
-
-	logger.Info("starting SOCKS5 proxy",
-		"listen", *listen,
-		"clientID", fmt.Sprintf("%08x", clientID),
-	)
-	logger.Info("jazztun ready",
-		"version", buildinfo.Version,
-		"listen", *listen,
-		"roomId", roomSpec.RoomID,
-		"peersPerRoom", peerCount,
-		"totalPeers", len(peers),
-		"keyPrefix", hex.EncodeToString(keyBytes[:4]),
-		"socksAuth", *socksUser != "",
-	)
+	printClientStartup(*listen, roomSpec.RoomID, peerCount, *socksUser != "", clientID)
 
 	// Handle signals
 	sigCh := make(chan os.Signal, 1)
@@ -199,4 +179,15 @@ func resolveRoom(roomArg string) (jazz.RoomSpec, error) {
 		Password: password,
 		URL:      roomArg,
 	}, nil
+}
+
+func printClientStartup(listen, roomID string, peers int, socksAuth bool, clientID uint32) {
+	fmt.Printf("jazztun %s client ready\n", buildinfo.Version)
+	fmt.Printf("  listen:     %s\n", listen)
+	fmt.Printf("  room id:    %s\n", roomID)
+	fmt.Printf("  peers:      %d\n", peers)
+	fmt.Printf("  socks auth: %t\n", socksAuth)
+	fmt.Printf("  client id:  %08x\n", clientID)
+	fmt.Println()
+	fmt.Println("Configure your app to use SOCKS5 at the address above.")
 }
