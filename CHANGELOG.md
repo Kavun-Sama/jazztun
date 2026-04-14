@@ -7,16 +7,21 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-04-14
+
 ### Added
-- GitHub Actions CI workflow
-- GitHub Actions release workflow with cross-platform builds and SHA256 checksums
-- Public binary version reporting via `-version`
-- Optional RFC 1929 username/password auth for the local SOCKS5 proxy
+- Session-scoped transport pairing with the `-session` flag
+- Multiple independent tunnel pairs inside one Jazz room
+- Secure transport envelope that authenticates peers by shared key and session namespace
+- Duplicate-session detection for conflicting clients in the same room
+- Container packaging via `Dockerfile` and `docker-compose.server.yml`
+- `SECURITY.md`
+- Multi-platform container publishing to GitHub Container Registry
 
 ### Changed
-- Project renamed to `jazztun`
-- Module path updated to `github.com/Kavun-Sama/jazztun`
-- README rewritten for the public release and release downloads
+- Server startup output now includes ready-to-run client commands for Windows, Linux, and Termux
+- Normal terminal output is quiet by default; technical logs stay behind `-v`
+- README expanded with shared-room sessions, container usage, and deployment guidance
 
 ## [0.2.0] - 2026-04-14
 

@@ -2,4 +2,4 @@ package buildinfo
 
 // Version is the human-facing release string shown by the binaries.
 // Release builds override it via -ldflags.
-var Version = "v0.2.0"
+var Version = "v0.3.0"

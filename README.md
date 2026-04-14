@@ -63,6 +63,12 @@ To reach resources blocked in Russia, the remote server must be outside Russia. 
 
 Pre-built binaries for Linux, Windows, and macOS (Apple Silicon) are published on the [Releases page](https://github.com/Kavun-Sama/jazztun/releases).
 
+The container image for the server is published to GitHub Container Registry:
+
+```bash
+docker run --rm -it ghcr.io/kavun-sama/jazztun-server:latest -room new
+```
+
 Each release includes `checksums.txt`. Verify it before running the binaries:
 
 ```bash
@@ -107,10 +113,22 @@ Build the server image locally:
 docker build -t jazztun-server:local .
 ```
 
+Or pull the published image:
+
+```bash
+docker pull ghcr.io/kavun-sama/jazztun-server:latest
+```
+
 Run it directly:
 
 ```bash
 docker run --rm -it jazztun-server:local -room new -peers 4
+```
+
+Run the published image directly:
+
+```bash
+docker run --rm -it ghcr.io/kavun-sama/jazztun-server:latest -room new -peers 4
 ```
 
 Or use the provided compose file:
@@ -396,6 +414,12 @@ Server egress through another SOCKS5 proxy:
 
 Готовые бинарники для Linux, Windows и macOS (Apple Silicon) публикуются на [странице релизов](https://github.com/Kavun-Sama/jazztun/releases).
 
+Контейнерный образ сервера публикуется в GitHub Container Registry:
+
+```bash
+docker run --rm -it ghcr.io/kavun-sama/jazztun-server:latest -room new
+```
+
 В каждом релизе есть `checksums.txt`. Перед запуском лучше проверить контрольные суммы:
 
 ```bash
@@ -439,10 +463,22 @@ go build -o client.exe .\cmd\client
 docker build -t jazztun-server:local .
 ```
 
+Или скачать уже опубликованный образ:
+
+```bash
+docker pull ghcr.io/kavun-sama/jazztun-server:latest
+```
+
 Запустить напрямую:
 
 ```bash
 docker run --rm -it jazztun-server:local -room new -peers 4
+```
+
+Запустить опубликованный образ напрямую:
+
+```bash
+docker run --rm -it ghcr.io/kavun-sama/jazztun-server:latest -room new -peers 4
 ```
 
 Или использовать готовый compose-файл:
