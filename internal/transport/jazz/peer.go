@@ -75,6 +75,8 @@ type Peer struct {
 	pubTrackPublishedCh chan struct{}
 
 	log *slog.Logger
+
+	telemetry *clientMetricsReporter
 }
 
 // PeerConfig holds configuration for creating a new Peer.
@@ -93,7 +95,7 @@ func NewPeer(cfg PeerConfig) *Peer {
 	if cfg.Logger == nil {
 		cfg.Logger = slog.Default()
 	}
-	return &Peer{
+	peer := &Peer{
 		roomID:                cfg.RoomID,
 		password:              cfg.Password,
 		connectorURL:          cfg.ConnectorURL,
@@ -108,6 +110,8 @@ func NewPeer(cfg PeerConfig) *Peer {
 		targetReadyCh:         make(chan struct{}),
 		log:                   cfg.Logger.With(slog.String("component", "jazz/peer")),
 	}
+	peer.telemetry = newClientMetricsReporter(peer.apiClient, peer.log, peer.participantName, peer.roomID)
+	return peer
 }
 
 // Connect establishes the WebRTC connection through Jazz signaling.
@@ -208,6 +212,9 @@ func (p *Peer) Close() error {
 	}
 	if p.pubPC != nil {
 		p.pubPC.Close()
+	}
+	if p.telemetry != nil {
+		p.telemetry.Close()
 	}
 
 	// Signal done if not already
@@ -369,6 +376,10 @@ func (p *Peer) connectWS(ctx context.Context) error {
 	p.ws = ws
 	p.wsMu.Unlock()
 
+	if p.telemetry != nil {
+		p.telemetry.ReportLatency("signallingConnected", p.telemetry.elapsed())
+	}
+
 	p.log.Debug("websocket connected", "url", p.connectorURL)
 	return nil
 }
@@ -519,6 +530,10 @@ func (p *Peer) handleJoinResponse(payload json.RawMessage) {
 	}
 
 	p.groupID = resp.ParticipantGroup.GroupID
+	if p.telemetry != nil {
+		p.telemetry.SetSession(resp.MeetingID, resp.Participant.ParticipantID)
+		p.telemetry.ReportLatency("roomConnected", p.telemetry.elapsed())
+	}
 	p.log.Info("joined room",
 		"roomId", resp.RoomID,
 		"groupId", p.groupID,
@@ -618,6 +633,10 @@ func (p *Peer) handleRTCJoin(data json.RawMessage) {
 
 	p.participantSID = join.Participant.SID
 	p.participantIdentity = join.Participant.Identity
+	if p.telemetry != nil {
+		p.telemetry.ReportOpenConference()
+		p.telemetry.ReportLatency("connectorJoined", p.telemetry.elapsed())
+	}
 	for _, other := range join.OtherParticipants {
 		p.updateRemoteIdentity(other.Identity, other.Name, other.State)
 	}
@@ -683,6 +702,10 @@ func (p *Peer) handleRTCOffer(data json.RawMessage) {
 	}
 
 	p.log.Debug("received SDP offer")
+	if p.telemetry != nil {
+		p.telemetry.ReportLatency("mediaOut", p.telemetry.elapsed())
+		p.telemetry.ReportLatency("subscriberMediaOfferReceived0", p.telemetry.elapsed())
+	}
 
 	if err := p.setupPeerConnection(desc.SDP); err != nil {
 		p.log.Error("setup peer connection", "error", err)
@@ -712,6 +735,11 @@ func (p *Peer) handleRTCAnswer(data json.RawMessage) {
 	}
 	if err := p.pubPC.SetRemoteDescription(answer); err != nil {
 		p.log.Error("set publisher remote description", "error", err)
+		return
+	}
+	if p.telemetry != nil {
+		p.telemetry.ReportLatency("publisherMediaAnswerReceived0", p.telemetry.elapsed())
+		p.telemetry.ReportLatency("publisherMediaAnswerSet0", p.telemetry.elapsed())
 	}
 }
 
@@ -737,6 +765,10 @@ func (p *Peer) setupPeerConnection(offerSDP string) error {
 		dc.OnOpen(func() {
 			p.log.Info("data channel open", "label", dc.Label())
 			p.dc = dc
+			if p.telemetry != nil {
+				p.telemetry.ReportLatency("subscriberConnected0", p.telemetry.elapsed())
+				p.telemetry.ReportMediaSessionStart(p.telemetry.elapsed())
+			}
 
 			select {
 			case <-p.readyCh:
@@ -801,6 +833,10 @@ func (p *Peer) setupPeerConnection(offerSDP string) error {
 			"sdp":  answer.SDP,
 		},
 	})
+	if p.telemetry != nil {
+		p.telemetry.ReportLatency("subscriberMediaAnswerCreated0", p.telemetry.elapsed())
+		p.telemetry.ReportLatency("subscriberMediaAnswerSent0", p.telemetry.elapsed())
+	}
 
 	return nil
 }
@@ -1049,6 +1085,11 @@ func (p *Peer) startPublisher(ctx context.Context) error {
 	reliableDC.OnOpen(func() {
 		p.log.Info("publisher data channel open", "label", reliableDC.Label())
 		p.pubDC = reliableDC
+		if p.telemetry != nil {
+			p.telemetry.ReportLatency("publisherConnected0", p.telemetry.elapsed())
+			p.telemetry.ReportLatency("publisherStarted0", p.telemetry.elapsed())
+			p.telemetry.ReportMicOff()
+		}
 		select {
 		case <-p.pubReadyCh:
 		default:
@@ -1123,6 +1164,10 @@ func (p *Peer) startPublisher(ctx context.Context) error {
 	if err := pc.SetLocalDescription(offer); err != nil {
 		return fmt.Errorf("set publisher local description: %w", err)
 	}
+	if p.telemetry != nil {
+		p.telemetry.ReportLatency("publisherRenegotiationStartedN", p.telemetry.elapsed())
+		p.telemetry.ReportLatency("publisherMediaOfferCreated0", p.telemetry.elapsed())
+	}
 
 	p.sendMediaIn("rtc:offer", map[string]any{
 		"description": map[string]any{
@@ -1130,6 +1175,9 @@ func (p *Peer) startPublisher(ctx context.Context) error {
 			"sdp":  offer.SDP,
 		},
 	})
+	if p.telemetry != nil {
+		p.telemetry.ReportLatency("publisherMediaOfferSent0", p.telemetry.elapsed())
+	}
 
 	return nil
 }

@@ -2,6 +2,7 @@ package jazz
 
 import (
 	"bytes"
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -160,6 +161,41 @@ func (c *APIClient) Preconnect(roomID, password string) (*PreconnectResponse, er
 
 	c.log.Info("preconnect ok", "connectorUrl", result.ConnectorURL)
 	return &result, nil
+}
+
+// SendClientMetrics posts browser-like first-party telemetry to the Jazz backend.
+func (c *APIClient) SendClientMetrics(ctx context.Context, events []clientMetricEvent) error {
+	if len(events) == 0 {
+		return nil
+	}
+
+	body, err := marshalClientMetrics(events)
+	if err != nil {
+		return err
+	}
+
+	req, err := http.NewRequestWithContext(ctx, "POST", baseURL+"/logs/client-metrics/", bytes.NewReader(body))
+	if err != nil {
+		return fmt.Errorf("create request: %w", err)
+	}
+	req.Header.Set("User-Agent", userAgent)
+	req.Header.Set("Origin", origin)
+	req.Header.Set("Referer", origin+"/")
+	req.Header.Set("Content-Type", "application/json;charset=utf-8")
+	req.Header.Set("Accept", "*/*")
+
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return fmt.Errorf("client metrics request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusAccepted {
+		respBody, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("client metrics: status %d: %s", resp.StatusCode, respBody)
+	}
+
+	return nil
 }
 
 // setHeaders sets the required Jazz API headers on a request.
