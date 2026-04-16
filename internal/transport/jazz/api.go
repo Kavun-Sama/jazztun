@@ -18,16 +18,19 @@ import (
 const (
 	baseURL             = "https://bk.salutejazz.ru"
 	origin              = "https://salutejazz.ru"
-	userAgent           = "Mozilla/5.0 (X11; Linux x86_64; rv:135.0) Gecko/20100101 Firefox/135.0"
-	jazzUA              = "osName=Linux;osVersion=6.1;appName=jazz;appVersion=26.21.7;surface=WEB;browserName=Firefox;browserVersion=135.0"
+	userAgent           = "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:135.0) Gecko/20100101 Firefox/135.0"
+	jazzUA              = "osName=Windows;osVersion=NT 10.0;appName=jazz;appVersion=26.21.7;surface=WEB;browserName=Firefox;browserVersion=135.0"
 	DefaultConnectorURL = "wss://ws.salutejazz.ru/connector"
 )
 
 // APIClient handles Jazz REST API calls.
 type APIClient struct {
-	clientID string
-	http     *http.Client
-	log      *slog.Logger
+	clientID         string
+	ampCookie        string
+	clickbeatCookieA string
+	clickbeatCookieB string
+	http             *http.Client
+	log              *slog.Logger
 }
 
 // RoomSpec describes one Salute Jazz room used by the tunnel.
@@ -44,9 +47,12 @@ func NewAPIClient(logger *slog.Logger) *APIClient {
 		logger = slog.Default()
 	}
 	return &APIClient{
-		clientID: uuid.New().String(),
-		http:     &http.Client{},
-		log:      logger.With(slog.String("component", "jazz/api")),
+		clientID:         uuid.New().String(),
+		ampCookie:        randomAmpCookie(),
+		clickbeatCookieA: randomHex(16),
+		clickbeatCookieB: randomHex(16),
+		http:             &http.Client{},
+		log:              logger.With(slog.String("component", "jazz/api")),
 	}
 }
 
@@ -183,6 +189,14 @@ func (c *APIClient) SendClientMetrics(ctx context.Context, events []clientMetric
 	req.Header.Set("Referer", origin+"/")
 	req.Header.Set("Content-Type", "application/json;charset=utf-8")
 	req.Header.Set("Accept", "*/*")
+	req.Header.Set("Accept-Language", "en-US,en;q=0.5")
+	req.Header.Set("DNT", "1")
+	req.Header.Set("Sec-GPC", "1")
+	req.Header.Set("Sec-Fetch-Dest", "empty")
+	req.Header.Set("Sec-Fetch-Mode", "cors")
+	req.Header.Set("Sec-Fetch-Site", "same-site")
+	req.Header.Set("Priority", "u=6")
+	req.Header.Set("Cookie", "amp_8ee72e="+c.ampCookie)
 
 	resp, err := c.http.Do(req)
 	if err != nil {
@@ -209,6 +223,10 @@ func (c *APIClient) setHeaders(req *http.Request) {
 	req.Header.Set("Origin", origin)
 	req.Header.Set("Referer", origin+"/")
 	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "*/*")
+	req.Header.Set("Accept-Language", "en-US,en;q=0.5")
+	req.Header.Set("DNT", "1")
+	req.Header.Set("Sec-GPC", "1")
 }
 
 // ParseRoomURL parses a Jazz invite URL into roomID and password.
@@ -295,4 +313,16 @@ func BuildRoomURL(roomID, password string) (string, error) {
 // ClientID returns the session client ID.
 func (c *APIClient) ClientID() string {
 	return c.clientID
+}
+
+func (c *APIClient) AmpCookie() string {
+	return c.ampCookie
+}
+
+func (c *APIClient) ClickbeatCookies() (string, string) {
+	return c.clickbeatCookieA, c.clickbeatCookieB
+}
+
+func randomAmpCookie() string {
+	return fmt.Sprintf("%s...%s.%s.0.0.0", uuid.New().String(), randomHex(5), randomHex(5))
 }

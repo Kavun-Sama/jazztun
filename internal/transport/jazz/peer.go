@@ -39,6 +39,7 @@ type Peer struct {
 	password              string
 	connectorURL          string
 	apiClient             *APIClient
+	sessionID             string
 	participantName       string
 	targetParticipantName string
 
@@ -101,6 +102,7 @@ func NewPeer(cfg PeerConfig) *Peer {
 		password:              cfg.Password,
 		connectorURL:          cfg.ConnectorURL,
 		apiClient:             cfg.APIClient,
+		sessionID:             uuid.New().String(),
 		participantName:       cfg.ParticipantName,
 		targetParticipantName: cfg.TargetParticipantName,
 		remoteIdentities:      make(map[string]struct{}),
@@ -367,11 +369,22 @@ func (p *Peer) WatchConnection(ctx context.Context) {
 func (p *Peer) connectWS(ctx context.Context) error {
 	dialer := websocket.Dialer{
 		HandshakeTimeout: 10 * time.Second,
+		EnableCompression: true,
 	}
 
 	headers := map[string][]string{
-		"Origin":     {origin},
-		"User-Agent": {userAgent},
+		"Origin":          {origin},
+		"User-Agent":      {userAgent},
+		"Accept":          {"*/*"},
+		"Accept-Language": {"en-US,en;q=0.5"},
+		"DNT":             {"1"},
+		"Sec-GPC":         {"1"},
+		"Cookie":          {"amp_8ee72e=" + p.apiClient.AmpCookie()},
+		"Sec-Fetch-Dest":  {"empty"},
+		"Sec-Fetch-Mode":  {"websocket"},
+		"Sec-Fetch-Site":  {"same-site"},
+		"Pragma":          {"no-cache"},
+		"Cache-Control":   {"no-cache"},
 	}
 
 	ws, _, err := dialer.DialContext(ctx, p.connectorURL, headers)
@@ -411,6 +424,7 @@ func (p *Peer) join() error {
 	payload := map[string]any{
 		"password":        p.password,
 		"participantName": participantName,
+		"sessionId":       p.sessionID,
 		"supportedFeatures": map[string]any{
 			"attachedRooms": true,
 			"sessionGroups": true,
@@ -541,6 +555,7 @@ func (p *Peer) handleJoinResponse(payload json.RawMessage) {
 		p.telemetry.SetSession(resp.MeetingID, resp.Participant.ParticipantID)
 		p.telemetry.ReportLatency("roomConnected", p.telemetry.elapsed())
 	}
+	p.requestInitialRoomState()
 	p.log.Info("joined room",
 		"roomId", resp.RoomID,
 		"groupId", p.groupID,
@@ -641,6 +656,8 @@ func (p *Peer) handleRTCJoin(data json.RawMessage) {
 	p.participantSID = join.Participant.SID
 	p.participantIdentity = join.Participant.Identity
 	if p.telemetry != nil {
+		p.telemetry.ReportUserName()
+		p.telemetry.ReportOpenVC()
 		p.telemetry.ReportOpenConference()
 		p.telemetry.ReportLatency("connectorJoined", p.telemetry.elapsed())
 	}
@@ -710,8 +727,11 @@ func (p *Peer) handleRTCOffer(data json.RawMessage) {
 
 	p.log.Debug("received SDP offer")
 	if p.telemetry != nil {
-		p.telemetry.ReportLatency("mediaOut", p.telemetry.elapsed())
-		p.telemetry.ReportLatency("subscriberMediaOfferReceived0", p.telemetry.elapsed())
+		elapsed := p.telemetry.elapsed()
+		p.telemetry.ReportLatencyGroup(
+			latencyValue{Name: "mediaOut", Value: elapsed},
+			latencyValue{Name: "subscriberMediaOfferReceived0", Value: elapsed},
+		)
 	}
 
 	if err := p.setupPeerConnection(desc.SDP); err != nil {
@@ -744,10 +764,6 @@ func (p *Peer) handleRTCAnswer(data json.RawMessage) {
 		p.log.Error("set publisher remote description", "error", err)
 		return
 	}
-	if p.telemetry != nil {
-		p.telemetry.ReportLatency("publisherMediaAnswerReceived0", p.telemetry.elapsed())
-		p.telemetry.ReportLatency("publisherMediaAnswerSet0", p.telemetry.elapsed())
-	}
 }
 
 func (p *Peer) setupPeerConnection(offerSDP string) error {
@@ -773,8 +789,23 @@ func (p *Peer) setupPeerConnection(offerSDP string) error {
 			p.log.Info("data channel open", "label", dc.Label())
 			p.dc = dc
 			if p.telemetry != nil {
-				p.telemetry.ReportLatency("subscriberConnected0", p.telemetry.elapsed())
-				p.telemetry.ReportMediaSessionStart(p.telemetry.elapsed())
+				elapsed := p.telemetry.elapsed()
+				p.telemetry.ReportLatencyGroup(
+					latencyValue{Name: "subscriberConnected0", Value: elapsed},
+					latencyValue{Name: "subscriberMediaAnswerGenerationLatency0", Value: 0},
+					latencyValue{Name: "subscriberMediaAnswerCreated0", Value: elapsed},
+					latencyValue{Name: "subscriberMediaAnswerSent0", Value: elapsed},
+				)
+				p.telemetry.ReportMediaSessionStart(elapsed)
+				p.telemetry.ReportWebRTC([]map[string]any{
+					{
+						"name": "iceCandidatePairSucceeded",
+						"labels": map[string]any{
+							"target": "subscriber",
+							"isVPN":  false,
+						},
+					},
+				})
 			}
 
 			select {
@@ -841,8 +872,8 @@ func (p *Peer) setupPeerConnection(offerSDP string) error {
 		},
 	})
 	if p.telemetry != nil {
-		p.telemetry.ReportLatency("subscriberMediaAnswerCreated0", p.telemetry.elapsed())
-		p.telemetry.ReportLatency("subscriberMediaAnswerSent0", p.telemetry.elapsed())
+		// Subscriber answer timing is reported when the data channel opens so it
+		// lands in the same batch as browser telemetry.
 	}
 
 	return nil
@@ -1093,9 +1124,28 @@ func (p *Peer) startPublisher(ctx context.Context) error {
 		p.log.Info("publisher data channel open", "label", reliableDC.Label())
 		p.pubDC = reliableDC
 		if p.telemetry != nil {
-			p.telemetry.ReportLatency("publisherConnected0", p.telemetry.elapsed())
-			p.telemetry.ReportLatency("publisherStarted0", p.telemetry.elapsed())
+			elapsed := p.telemetry.elapsed()
+			p.telemetry.ReportLatencyGroup(
+				latencyValue{Name: "publisherConnected0", Value: elapsed},
+				latencyValue{Name: "publisher0Connected0", Value: 756},
+				latencyValue{Name: "publisherMediaOfferCreated0", Value: elapsed},
+				latencyValue{Name: "publisher0MediaOfferCreated0", Value: 2},
+				latencyValue{Name: "publisherMediaOfferSent0", Value: elapsed},
+				latencyValue{Name: "publisher0MediaOfferSent0", Value: elapsed},
+				latencyValue{Name: "publisherMediaAnswerReceived0", Value: elapsed},
+				latencyValue{Name: "publisher0MediaAnswerReceived0", Value: 140},
+			)
+			p.telemetry.ReportLatency("publisherStarted0", elapsed)
 			p.telemetry.ReportMicOff()
+			p.telemetry.ReportWebRTC([]map[string]any{
+				{
+					"name": "iceCandidatePairSucceeded",
+					"labels": map[string]any{
+						"target": "publisher",
+						"isVPN":  false,
+					},
+				},
+			})
 		}
 		select {
 		case <-p.pubReadyCh:
@@ -1173,7 +1223,6 @@ func (p *Peer) startPublisher(ctx context.Context) error {
 	}
 	if p.telemetry != nil {
 		p.telemetry.ReportLatency("publisherRenegotiationStartedN", p.telemetry.elapsed())
-		p.telemetry.ReportLatency("publisherMediaOfferCreated0", p.telemetry.elapsed())
 	}
 
 	p.sendMediaIn("rtc:offer", map[string]any{
@@ -1183,7 +1232,10 @@ func (p *Peer) startPublisher(ctx context.Context) error {
 		},
 	})
 	if p.telemetry != nil {
-		p.telemetry.ReportLatency("publisherMediaOfferSent0", p.telemetry.elapsed())
+		p.telemetry.ReportLatencyGroup(
+			latencyValue{Name: "publisherMediaAnswerSet0", Value: 141},
+			latencyValue{Name: "publisher0MediaAnswerSet0", Value: p.telemetry.elapsed()},
+		)
 	}
 
 	return nil
@@ -1202,5 +1254,17 @@ func (p *Peer) handleDataChannelMessage(msg webrtc.DataChannelMessage) {
 
 	if fn != nil {
 		fn(payload)
+	}
+}
+
+func (p *Peer) requestInitialRoomState() {
+	if p.groupID == "" {
+		return
+	}
+	if err := p.sendWS("get-chat-messages", map[string]any{"limit": 25}); err != nil {
+		p.log.Debug("request chat messages", "error", err)
+	}
+	if err := p.sendWS("get-transcription-messages", map[string]any{"pageKey": nil, "limit": 100}); err != nil {
+		p.log.Debug("request transcription messages", "error", err)
 	}
 }

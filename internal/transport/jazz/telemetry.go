@@ -82,12 +82,33 @@ func (r *clientMetricsReporter) SetSession(meetingID, participantID string) {
 	r.mu.Unlock()
 }
 
-func (r *clientMetricsReporter) ReportOpenConference() {
-	r.queueEvent("siem.openConference", map[string]any{
+func (r *clientMetricsReporter) ReportUserName() {
+	r.queueEvent("siem.userName", map[string]any{"name": r.participantName})
+}
+
+func (r *clientMetricsReporter) ReportOpenVC() {
+	r.queueEvent("firebase.openVc", map[string]any{
 		"userRole":   "member",
+		"micType":    "Microphone (Realtek(R) Audio)",
+		"spType":     "Speakers (Realtek(R) Audio)",
 		"camEnabled": false,
 		"micEnabled": false,
 	})
+}
+
+func (r *clientMetricsReporter) ReportOpenConference() {
+	r.queueEvent("siem.openConference", map[string]any{
+		"userRole":   "member",
+		"micType":    "Microphone (Realtek(R) Audio)",
+		"spType":     "Speakers (Realtek(R) Audio)",
+		"camEnabled": false,
+		"micEnabled": false,
+	})
+}
+
+func (r *clientMetricsReporter) ReportChatOpen() {
+	r.queueEvent("firebase.chatOpenChat", nil)
+	r.queueEvent("siem.chatButtonClick", nil)
 }
 
 func (r *clientMetricsReporter) ReportMicOff() {
@@ -98,6 +119,13 @@ func (r *clientMetricsReporter) ReportLatency(name string, value int64) {
 	r.queueEvent("client.jn.latency", []latencyValue{{Name: name, Value: value}})
 }
 
+func (r *clientMetricsReporter) ReportLatencyGroup(values ...latencyValue) {
+	if len(values) == 0 {
+		return
+	}
+	r.queueEvent("client.jn.latency", values)
+}
+
 func (r *clientMetricsReporter) ReportMediaSessionStart(iceConnected int64) {
 	r.queueEvent("client.mediaSessionStart", map[string]any{
 		"transportConnected": 0,
@@ -105,6 +133,13 @@ func (r *clientMetricsReporter) ReportMediaSessionStart(iceConnected int64) {
 		"mediaSessionTime":   r.elapsed(),
 		"iceConnected":       iceConnected,
 	})
+}
+
+func (r *clientMetricsReporter) ReportWebRTC(values []map[string]any) {
+	if len(values) == 0 {
+		return
+	}
+	r.queueEvent("client.jn.webrtc", values)
 }
 
 func (r *clientMetricsReporter) queueEvent(eventType string, values any) {
@@ -182,11 +217,11 @@ func (r *clientMetricsReporter) baseMeta(eventType string) map[string]any {
 	r.mu.Unlock()
 
 	meta := map[string]any{
-		"os":                        "Linux x86_64",
-		"osName":                    "Linux",
+		"os":                        "Windows NT 10.0",
+		"osName":                    "Windows",
 		"surface":                   "web",
-		"osVersion":                 "6.1",
-		"platform":                  "Linux",
+		"osVersion":                 "NT 10.0",
+		"platform":                  "Windows",
 		"browser":                   "Firefox",
 		"browser_version":           "135.0",
 		"version":                   "26.21.7",

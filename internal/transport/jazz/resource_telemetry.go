@@ -56,8 +56,6 @@ type browserResourceReporter struct {
 	sessionID string
 	startedAt time.Time
 	stopCh    chan struct{}
-	cookieA   string
-	cookieB   string
 }
 
 func newBrowserResourceReporter(api *APIClient, logger *slog.Logger, roomURL string) *browserResourceReporter {
@@ -71,8 +69,6 @@ func newBrowserResourceReporter(api *APIClient, logger *slog.Logger, roomURL str
 		sessionID: uuid.New().String(),
 		startedAt: time.Now(),
 		stopCh:    make(chan struct{}),
-		cookieA:   randomHex(16),
-		cookieB:   randomHex(16),
 	}
 	go r.loop()
 	return r
@@ -116,7 +112,8 @@ func (r *browserResourceReporter) reportOnce() {
 	if err := r.api.SendPromResourceMetric(ctx, metric); err != nil {
 		r.log.Debug("send prom resource metric", "error", err)
 	}
-	if err := r.api.SendClickbeatResourceMetric(ctx, metric, r.cookieA, r.cookieB); err != nil {
+	cookieA, cookieB := r.api.ClickbeatCookies()
+	if err := r.api.SendClickbeatResourceMetric(ctx, metric, cookieA, cookieB); err != nil {
 		r.log.Debug("send clickbeat resource metric", "error", err)
 	}
 }
@@ -133,9 +130,11 @@ func (r *browserResourceReporter) fetchAnnouncement(ctx context.Context) (*resou
 	req.Header.Set("Referer", r.roomURL)
 	req.Header.Set("DNT", "1")
 	req.Header.Set("Sec-GPC", "1")
+	req.Header.Set("Cookie", "amp_8ee72e="+r.api.AmpCookie())
 	req.Header.Set("Sec-Fetch-Dest", "empty")
 	req.Header.Set("Sec-Fetch-Mode", "cors")
 	req.Header.Set("Sec-Fetch-Site", "same-origin")
+	req.Header.Set("Priority", "u=4")
 
 	resp, err := r.api.http.Do(req)
 	if err != nil {
@@ -212,9 +211,14 @@ func (c *APIClient) sendThirdPartyMetric(ctx context.Context, target string, met
 	req.Header.Set("DNT", "1")
 	req.Header.Set("Sec-GPC", "1")
 	req.Header.Set("Sec-Fetch-Dest", "empty")
-	req.Header.Set("Sec-Fetch-Mode", "cors")
 	req.Header.Set("Sec-Fetch-Site", "cross-site")
+	if target == metricsPromResourceURL {
+		req.Header.Set("Sec-Fetch-Mode", "no-cors")
+	} else {
+		req.Header.Set("Sec-Fetch-Mode", "cors")
+	}
 	if withCookies {
+		req.Header.Set("Connection", "keep-alive")
 		req.Header.Set("Cookie",
 			fmt.Sprintf("e97163bb34ffae5c26a70011050a367f=%s; ecfe106684f479d674c0510065cafd9d=%s", cookieA, cookieB))
 	}
