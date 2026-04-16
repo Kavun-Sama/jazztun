@@ -76,7 +76,8 @@ type Peer struct {
 
 	log *slog.Logger
 
-	telemetry *clientMetricsReporter
+	telemetry        *clientMetricsReporter
+	resourceReporter *browserResourceReporter
 }
 
 // PeerConfig holds configuration for creating a new Peer.
@@ -111,6 +112,9 @@ func NewPeer(cfg PeerConfig) *Peer {
 		log:                   cfg.Logger.With(slog.String("component", "jazz/peer")),
 	}
 	peer.telemetry = newClientMetricsReporter(peer.apiClient, peer.log, peer.participantName, peer.roomID)
+	if roomURL, err := BuildRoomURL(peer.roomID, peer.password); err == nil {
+		peer.resourceReporter = newBrowserResourceReporter(peer.apiClient, peer.log, roomURL)
+	}
 	return peer
 }
 
@@ -215,6 +219,9 @@ func (p *Peer) Close() error {
 	}
 	if p.telemetry != nil {
 		p.telemetry.Close()
+	}
+	if p.resourceReporter != nil {
+		p.resourceReporter.Close()
 	}
 
 	// Signal done if not already
