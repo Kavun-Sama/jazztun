@@ -1,8 +1,15 @@
-# jazztun
+<h1 align="center">Jazztun</h1>
+
+<div align="center">
 
 [![CI](https://github.com/Kavun-Sama/jazztun/actions/workflows/ci.yml/badge.svg)](https://github.com/Kavun-Sama/jazztun/actions/workflows/ci.yml)
 [![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](LICENSE)
-[![Telegram](https://img.shields.io/badge/Telegram-@kkkavun-26A5E4?logo=telegram&logoColor=white)](https://t.me/kkkavun)
+
+</div>
+
+> **Status: archived.** Jazztun no longer works reliably. After a few minutes of use, the client's IP stops reaching Salute Jazz: connections are dropped silently and the domain no longer resolves. The cause has not been confirmed; most likely the service detects non-browser clients. The project depends entirely on infrastructure that was not designed for this use, so no further development is planned. The code and the protocol description are kept for reference.
+>
+> **Статус: архив.** Jazztun больше не работает стабильно. Спустя несколько минут использования IP клиента перестаёт достукиваться до Salute Jazz: соединения молча отбрасываются, а домен перестаёт резолвиться. Причина не подтверждена; скорее всего, сервис определяет клиентов, не являющихся браузером. Проект целиком зависит от инфраструктуры, не рассчитанной на такое использование, поэтому дальнейшая разработка не планируется. Код и описание протокола оставлены как справочный материал.
 
 A proxy tunnel that routes TCP traffic through [Salute Jazz](https://salutejazz.ru) WebRTC infrastructure. It is meant for cases where classic VPN protocols are easy to detect or block, while browser-based video traffic is still allowed.
 
@@ -12,11 +19,11 @@ A proxy tunnel that routes TCP traffic through [Salute Jazz](https://salutejazz.
 
 ### Description
 
-`jazztun` runs a local SOCKS5 proxy and sends TCP traffic through a Salute Jazz room to a remote server. Your browser or app talks to `127.0.0.1:1080`; the remote host becomes the exit point.
+Jazztun runs a local SOCKS5 proxy and sends TCP traffic through a Salute Jazz room to a remote server. Your browser or app talks to `127.0.0.1:1080`; the remote host becomes the exit point.
 
 Why this works in places where regular VPNs do not: the transport path looks like a normal browser video session built on Jazz signaling, TURN, and WebRTC DataChannels, not a conventional VPN tunnel.
 
-To reach resources blocked in Russia, the remote server must be outside Russia. When Salute Jazz itself is allowed or explicitly whitelisted in a network, `jazztun` benefits from that allowance.
+To reach resources blocked in Russia, the remote server must be outside Russia. When Salute Jazz itself is allowed or explicitly whitelisted in a network, Jazztun benefits from that allowance.
 
 ### Protocol Flow
 
@@ -182,7 +189,7 @@ If you want the local SOCKS5 proxy to be usable by other devices in your LAN:
 
 ### Shared Room Sessions
 
-One Jazz room can now carry several independent `jazztun` pairs at once.
+One Jazz room can now carry several independent Jazztun pairs at once.
 
 - Same room URL + same key + same `-session` value: same tunnel pair
 - Same room URL + same key + different `-session` value: separate tunnel pair
@@ -363,11 +370,11 @@ Server egress through another SOCKS5 proxy:
 
 ### Описание
 
-`jazztun` поднимает локальный SOCKS5-прокси и отправляет TCP-трафик через комнату Salute Jazz на удалённый сервер. Приложение или браузер подключается к `127.0.0.1:1080`, а удалённая машина становится точкой выхода трафика.
+Jazztun поднимает локальный SOCKS5-прокси и отправляет TCP-трафик через комнату Salute Jazz на удалённый сервер. Приложение или браузер подключается к `127.0.0.1:1080`, а удалённая машина становится точкой выхода трафика.
 
 Почему это работает там, где обычный VPN режут: транспорт выглядит как обычная browser-сессия видеозвонка на Jazz signaling, TURN и WebRTC DataChannels, а не как классический VPN-туннель.
 
-Чтобы получать доступ к ресурсам, заблокированным в РФ, удалённый сервер должен находиться за пределами РФ. Если сам Salute Jazz в сети доступен или внесён в белый список, `jazztun` получает это преимущество вместе с ним.
+Чтобы получать доступ к ресурсам, заблокированным в РФ, удалённый сервер должен находиться за пределами РФ. Если сам Salute Jazz в сети доступен или внесён в белый список, Jazztun получает это преимущество вместе с ним.
 
 ### Схема Протокола
 
@@ -532,7 +539,7 @@ chmod +x ./server
 
 ### Несколько Пар В Одной Комнате
 
-Теперь одна Jazz-комната может нести несколько независимых пар `jazztun`.
+Теперь одна Jazz-комната может нести несколько независимых пар Jazztun.
 
 - один room URL + один ключ + одинаковый `-session`: одна и та же пара туннеля
 - один room URL + один ключ + разный `-session`: разные независимые пары
